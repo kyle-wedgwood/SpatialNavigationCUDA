@@ -1,2 +1,4 @@
 dfun2.txt
 test*
+*.swp
+*.o
