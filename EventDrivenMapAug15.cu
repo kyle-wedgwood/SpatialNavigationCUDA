@@ -64,7 +64,6 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   CUDA_CALL( cudaMalloc( &mpGlobalZone, mNetworkSize*mNetworkSize*sizeof(short)));
   CUDA_CALL( cudaMalloc( &mpFiringVal, mNetworkSize*mNetworkSize*sizeof(firing)));
   CUDA_CALL( cudaMalloc( &mpFiringValTemp, mNoBlocks*sizeof(firing)));
-  CUDA_CALL( cudaMalloc( &mpHost_firingVal, sizeof(firing)));
   CUDA_CALL( cudaMalloc( &mpEventNo, sizeof(int)));
   CUDA_CALL( cudaMallocHost( &mpHost_eventNo, sizeof(int)));
 }
@@ -77,7 +76,6 @@ EventDrivenMap::~EventDrivenMap()
   cudaFree( mpFiringVal);
   cudaFree( mpFiringValTemp);
   cudaFree( mpEventNo);
-  cudaFree( mpHost_firingVal);
   cudaFree( mpHost_eventNo);
 }
 
@@ -88,11 +86,6 @@ void EventDrivenMap::SimulateNetwork( const float finalTime)
   while (mTime<finalTime)
   {
     SimulateStep();
-
-    // Code to plot output
-
-    // Prepare for next step
-    mTime += mDt;
   }
 }
 
@@ -119,55 +112,42 @@ __global__ void InitialiseNetworkKernel( float4* pGlobalState,
 
 void EventDrivenMap::SimulateStep()
 {
-  float local_time = 0.0f;
-  while (local_time<mDt)
+  mTime = 0.0f;
+  while (mTime<mDt)
   {
     // First, find spiking cell
-    FindMinimumSpikeTime( mDt-mTime);
-    CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringValTemp, sizeof(firing), cudaMemcpyDeviceToHost));
+    FindMinimumSpikeTime();
 
     // Update all cells
-    UpdateZone1Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+    UpdateZone1Kernel<<<mNoBlocks,mNoThreads>>>( (*mpFiringValTemp)[0].time,
        mpGlobalState, mpGlobalZone);
     CUDA_CHECK_ERROR();
-    UpdateZone2Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+    UpdateZone2Kernel<<<mNoBlocks,mNoThreads>>>( (*mpFiringValTemp)[0].time,
        mpGlobalState, mpGlobalZone);
     CUDA_CHECK_ERROR();
-    UpdateZone3Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+    UpdateZone3Kernel<<<mNoBlocks,mNoThreads>>>( (*mpFiringValTemp)[0].time,
        mpGlobalState, mpGlobalZone);
     CUDA_CHECK_ERROR();
-    UpdateZone4Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+    UpdateZone4Kernel<<<mNoBlocks,mNoThreads>>>( (*mpFiringValTemp)[0].time,
        mpGlobalState, mpGlobalZone, mpRefractTime);
     CUDA_CHECK_ERROR();
 
     // Update time
-    local_time += (*mpHost_firingVal).time;
+    mTime += (*mpSpikingCell).time;
 
     // Reset neuron that fired
-    if (*mpHost_eventNo>0)
-    {
-      ApplyResetKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState, (*mpSpikingCell).index);
-      CUDA_CHECK_ERROR();
-    }
+    ApplyResetKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState, (*mpSpikingCell).index);
+    CUDA_CHECK_ERROR();
 
     // Reset memory
-    if (*mpHost_eventNo==0)
-    {
-      ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mDt);
-      CUDA_CHECK_ERROR();
-    }
-    else
-    {
-      ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, *mpHost_eventNo, mDt-local_time);
-      CUDA_CHECK_ERROR();
-    }
-    CUDA_CALL( cudaMemset( mpEventNo, 0, sizeof(int)));
+    ResetMemoryKernel<<<mNoThreads,mNoThreads>>>( mpFiringVal, mNetworkSize);
+    CUDA_CHECK_ERROR();
   }
 }
 
 __global__ void UpdateZone1Kernel( const float eventTime,
-                                   float4* pGlobalState,
-                                   unsigned int *pGlobalZone)
+                              float4* pGlobalState,
+                              unsigned int *pGlobalZone)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   bool correct_zone  = (pGlobalZone[index] == 1);
@@ -225,7 +205,7 @@ __device__ float4 UpdateStateZone1( float t, float4 state)
 
 __global__ void UpdateZone2Kernel( const float eventTime,
                               float4* pGlobalState,
-                              unsigned int* pGlobalZone)
+                              unsigned int *pGlobalZone)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   unsigned int local_zone = pGlobalZone[index];
@@ -302,7 +282,7 @@ __device__ float4 UpdateStateZone2( float t, float4 state)
 
 __global__ void UpdateZone3Kernel( const float eventTime,
                                    float4* pGlobalState,
-                                   unsigned int* pGlobalZone)
+                                   unsigned int *pGlobalZone)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   bool correct_zone  = (pGlobalZone[index] == 3);
@@ -365,9 +345,9 @@ __device__ float4 UpdateStateZone3( float t, float4 state)
 }
 
 __global__ void UpdateZone4Kernel( const float eventTime,
-                                   float4* pGlobalState,
-                                   unsigned int* pGlobalZone,
-                                   float* pRefractTime)
+                                   float4 pGlobalState,
+                                   unsigned int pGlobalZone,
+                                   float pRefractTime)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   bool correct_zone  = (pGlobalZone[index] == 4);
@@ -406,14 +386,122 @@ __device__ float4 UpdateStateZone4( float t, float4 state)
   return state;
 }
 
-__global__ void ResetMemoryKernel( firing pFiringVal, const unsigned int resetSize, const float stepSize)
+__global__ void ResetMemoryKernel( firing pFiringVal, const unsigned int networkSize, const float stepSize)
 {
   unsigned int index =  threadIdx.x+blockDim.x*blockIdx.x;
-  if (index<resetSize)
+  if (index<networkSize)
   {
     pFiringVal[index].time  = mDt;
     pFiringVal[index].index = 0;
   }
+}
+
+//----------------------------------------------------------------------------
+
+__global__ void updateZone4Kernel( float4* pGlobalState,
+                                   const unsigned int *pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  if (correct_zone)
+  {
+    float4 local_state = pGlobalState[k];
+    local_state = updateZone4( local_state, eventTime);
+    pGlobalState[k] = local_state;
+  }
+}
+
+__inline__ __device__ float4 updateZone1( float4 state, float t)
+{
+  float4 temp_state = state;
+  temp_state.x = state.x*expf(-t/tau)
+    +(beta_left*gh*(tau-tau_h+tau_h*expf(-t/tau_h)))/(tau-tau_h)
+    -(beta_left*gh*tau*expf(-t/tau))/(tau-tau_h)
+    -(gh*state.y*tau_h*expf(-t/tau_h))/(tau-tau_h)
+    +(gh*state.y*tau_h*expf(-t/tau))/(tau-tau_h)
+    +(gs*expf(-alpha*t)*(alpha*tau*state.z-state.z-alpha*t*state.w+alpha*tau*state.w+alpha*alpha*t*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -(gs*expf(-t/tau)*(alpha*tau*state.z-state.z+alpha*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -I +I*exp(-t/tau);
+  temp_state.y = beta_left*(1.0f-expf(-t/tau_h))+state.y*expf(-t/tau_h);
+  temp_state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
+  temp_state.w = state.w*expf(-alpha*t);
+
+  return temp_state;
+}
+
+__inline__ __device__ float4 updateState( float4 state, float t, unsigned short zone)
+{
+  float4 temp_state = state;
+  temp_state.x =
+    (zone==2)*(1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*(-state.x+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(I*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(I*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(-gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(gs*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+(I*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gs*(tau_h*tau_h)*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau-(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau+(gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*(tau_h*tau_h)*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(-1.0/2.0)+(1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*((tau*tau)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-(tau*tau)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+(tau_h*tau_h)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-(tau_h*tau_h)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*2.0+tau*tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*2.0)*(state.y+(beta_centre*tau*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(beta_centre*tau*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*2.0)/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gamma_centre*gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gamma_centre*gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(1.0/4.0))/(gamma_centre*tau))
+        +(zone==1)*(state.x*expf(-t/tau)
+    +(beta_left*gh*(tau-tau_h+tau_h*expf(-t/tau_h)))/(tau-tau_h)
+    -(beta_left*gh*tau*expf(-t/tau))/(tau-tau_h)
+    -(gh*state.y*tau_h*expf(-t/tau_h))/(tau-tau_h)
+    +(gh*state.y*tau_h*expf(-t/tau))/(tau-tau_h)
+    +(gs*expf(-alpha*t)*(alpha*tau*state.z-state.z-alpha*t*state.w+alpha*tau*state.w+alpha*alpha*t*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -(gs*expf(-t/tau)*(alpha*tau*state.z-state.z+alpha*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -I +I*exp(-t/tau))
+        +(zone==3)*(state.x*expf(-t/tau)
+    +(beta_right*gh*(tau-tau_h+tau_h*expf(-t/tau_h)))/(tau-tau_h)
+    -(beta_right*gh*tau*expf(-t/tau))/(tau-tau_h)
+    -(gh*state.y*tau_h*expf(-t/tau_h))/(tau-tau_h)
+    +(gh*state.y*tau_h*expf(-t/tau))/(tau-tau_h)
+    +(gs*expf(-alpha*t)*(alpha*tau*state.z-state.z-alpha*t*state.w+alpha*tau*state.w+alpha*alpha*t*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -(gs*expf(-t/tau)*(alpha*tau*state.z-state.z+alpha*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -I +I*exp(-t/tau))
+        +(zone==4)*V_r;
+  temp_state.y =
+    ((zone==2)|(zone==4))*(1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*(state.y+(beta_centre*tau*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(beta_centre*tau*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*2.0)/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gamma_centre*gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gamma_centre*gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(1.0/2.0)+(gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(-state.x+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(I*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(I*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(-gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(gs*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+(I*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gs*(tau_h*tau_h)*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau-(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau+(gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*(tau_h*tau_h)*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)))
+    +((zone==1)|(zone==3))*(beta_left*(1.0f-expf(-t/tau_h))+state.y*expf(-t/tau_h));
+  temp_state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
+  temp_state.w = state.w*expf(-alpha*t);
+
+  return temp_state;
+}
+
+__inline__ __device__ float4 updateZone2( float4 state, float t)
+{
+  float4 temp_state = state;
+  temp_state.x =
+    1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*(-state.x+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(I*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(I*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(-gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(gs*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+(I*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gs*(tau_h*tau_h)*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau-(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau+(gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*(tau_h*tau_h)*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(-1.0/2.0)+(1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*((tau*tau)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-(tau*tau)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+(tau_h*tau_h)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-(tau_h*tau_h)*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*2.0+tau*tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*2.0)*(state.y+(beta_centre*tau*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(beta_centre*tau*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*2.0)/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gamma_centre*gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gamma_centre*gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(1.0/4.0))/(gamma_centre*tau);
+  temp_state.y =
+    1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*(state.y+(beta_centre*tau*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(beta_centre*tau*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*2.0)/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gamma_centre*gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gamma_centre*gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(1.0/2.0)+(gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(-state.x+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(I*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(I*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(-gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(gs*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+(I*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gs*(tau_h*tau_h)*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau-(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau+(gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*(tau_h*tau_h)*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0));
+  temp_state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
+  temp_state.w = state.w*expf(-alpha*t);
+
+  return temp_state;
+}
+
+__inline__ __device__ float4 updateZone3( float4 state, float t)
+{
+  float4 temp_state = state;
+  temp_state.x = state.x*expf(-t/tau)
+    +(beta_right*gh*(tau-tau_h+tau_h*expf(-t/tau_h)))/(tau-tau_h)
+    -(beta_right*gh*tau*expf(-t/tau))/(tau-tau_h)
+    -(gh*state.y*tau_h*expf(-t/tau_h))/(tau-tau_h)
+    +(gh*state.y*tau_h*expf(-t/tau))/(tau-tau_h)
+    +(gs*expf(-alpha*t)*(alpha*tau*state.z-state.z-alpha*t*state.w+alpha*tau*state.w+alpha*alpha*t*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -(gs*expf(-t/tau)*(alpha*tau*state.z-state.z+alpha*tau*state.w))/powf(alpha*tau-1.0f,2)
+    -I +I*exp(-t/tau);
+  temp_state.y = beta_left*(1.0f-expf(-t/tau_h))+state.y*expf(-t/tau_h);
+  temp_state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
+  temp_state.w = state.w*expf(-alpha*t);
+
+  return temp_state;
+}
+
+__inline__ __device__ float4 updateZone4( float4 state, float t)
+{
+  float4 temp_state = state;
+  temp_state.x = V_r;
+  temp_state.y =
+     1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))+tau_h*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*(state.y+(beta_centre*tau*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(beta_centre*tau*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*gamma_centre*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*2.0)/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*gamma_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gamma_centre*gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gamma_centre*gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0))*(1.0/2.0)+(gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)-t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h))-gamma_centre*tau*exp((t*tau*(-1.0/2.0)-t*tau_h*(1.0/2.0)+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(-state.x+(beta_centre*(tau*tau)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*-2.0+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*2.0)+(I*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(I*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*(tau_h*tau_h)*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(beta_centre*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(-gamma_centre*(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+gamma_centre*tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))+(gs*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0)+(alpha*gs*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*(1.0/2.0))/tau+(I*tau*tau_h*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0))/(tau*tau_h*2.0+tau*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+tau_h*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-tau*tau-tau_h*tau_h-gamma_centre*gh*tau*tau_h*4.0)+(I*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(I*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))-(gs*(tau_h*tau_h)*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(beta_centre*(tau*tau)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))-(beta_centre*(tau_h*tau_h)*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0+tau*tau_h*exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(t*tau+t*tau_h-tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau-(alpha*gs*tau_h*state.w*((tau*tau)*(tau_h*tau_h)*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*4.0-tau*tau_h*exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))*1.0/pow(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0,2.0)*(-t*tau-t*tau_h+tau*tau_h*2.0+t*sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)+alpha*t*tau*tau_h*2.0)*2.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)*(1.0/2.0))/tau+(gs*tau*tau_h*state.z*(exp((t*(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h-sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)-(gs*(tau_h*tau_h)*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0)+(beta_centre*tau*tau_h*(exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h))-1.0)*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(gamma_centre*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)))+(gs*tau*tau_h*state.z*exp(-alpha*t)*(exp(alpha*t)-exp((t*(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))*(1.0/2.0))/(tau*tau_h)))*1.0/sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0))/(tau+tau_h+sqrt(tau*tau_h*-2.0+tau*tau+tau_h*tau_h+gamma_centre*gh*tau*tau_h*4.0)-alpha*tau*tau_h*2.0));
+  temp_state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
+  temp_state.w = state.w*expf(-alpha*t);
+
+  return temp_state;
 }
 
 __device__ float fun1( float t, float v0, float n0, float u0, float y0)
@@ -465,6 +553,227 @@ __device__ float dfun3( float t, float v0, float n0, float u0, float y0)
     (beta_right*gh*exp(-t/tau))/(tau-tau_h)-(v0*exp(-t/tau))/tau-(I*exp(-t/tau))/tau-(beta_right*gh*exp(-t/tau_h))/(tau-tau_h)+(gh*n0*exp(-t/tau_h))/(tau-tau_h)-(gs*exp(-alpha*t)*(-tau*y0*alpha*alpha+y0*alpha))/powf(alpha*tau-1.0f,2.0f)+(gs*exp(-t/tau)*(alpha*tau*u0-u0+alpha*tau*y0))/(tau*powf(alpha*tau-1.0f,2.0f))-(alpha*gs*exp(-alpha*t)*(alpha*tau*u0-u0-alpha*t*y0+alpha*tau*y0+alpha*alpha*t*tau*y0))/powf(alpha*tau-1.0f,2.0f)-(gh*n0*tau_h*exp(-t/tau))/(tau*(tau-tau_h));
 }
 
+__device__ float eventTimeZone1( float v0, float n0, float u0, float y0)
+{
+  float f, df, estimatedTime = 0.0f;
+
+  f  = fun1( estimatedTime, v0, n0, u0, y0);
+  df = dfun1( estimatedTime, v0, n0, u0, y0);
+
+  while (fabs(f)>tol) {
+    estimatedTime -= f/df;
+    f  = fun1( estimatedTime, v0, n0, u0, y0);
+    df = dfun1( estimatedTime, v0, n0, u0, y0);
+  }
+
+  return estimatedTime;
+}
+
+__device__ void eventTimeZone2( float v0, float n0, float u0, float y0,
+                                 float *t, unsigned short *cross)
+{
+  float f, df;
+  float estimatedTimeLeft  = 0.0f;
+  float estimatedTimeRight = 0.0f;
+
+  f  = fun2( estimatedTimeLeft, v0, n0, u0, y0, V_left);
+  df = dfun2( estimatedTimeLeft, v0, n0, u0, y0);
+
+  while (fabs(f)>tol) {
+    estimatedTimeLeft -= f/df;
+    f  = fun2( estimatedTimeLeft, v0, n0, u0, y0, V_left);
+    df = dfun2( estimatedTimeLeft, v0, n0, u0, y0);
+  }
+
+  f  = fun2( estimatedTimeRight, v0, n0, u0, y0, V_right);
+  df = dfun2( estimatedTimeRight, v0, n0, u0, y0);
+
+  while (fabs(f)>tol) {
+    estimatedTimeRight -= f/df;
+    f  = fun2( estimatedTimeRight, v0, n0, u0, y0, V_right);
+    df = dfun2( estimatedTimeRight, v0, n0, u0, y0);
+  }
+
+  *cross = 2;
+
+  if (estimatedTimeRight<estimatedTimeLeft)
+  {
+    estimatedTimeLeft = estimatedTimeRight;
+    *cross = 3;
+  }
+  *t = estimatedTimeLeft;
+}
+
+__device__ void eventTimeZone3( float v0, float n0, float u0, float y0,
+    float *t, unsigned short *cross)
+{
+  float f, df;
+  float estimatedTimeLeft  = 0.0f;
+  float estimatedTimeRight = 0.0f;
+
+  f  = fun3( estimatedTimeLeft, v0, n0, u0, y0, V_right);
+  df = dfun3( estimatedTimeLeft, v0, n0, u0, y0);
+
+  while (fabs(f)>tol) {
+    estimatedTimeLeft -= f/df;
+    f  = fun3( estimatedTimeLeft, v0, n0, u0, y0, V_right);
+    df = dfun3( estimatedTimeLeft, v0, n0, u0, y0);
+  }
+
+  f  = fun3( estimatedTimeRight, v0, n0, u0, y0, V_th);
+  df = dfun3( estimatedTimeRight, v0, n0, u0, y0);
+
+  while (fabs(f)>tol) {
+    estimatedTimeRight -= f/df;
+    f  = fun3( estimatedTimeRight, v0, n0, u0, y0, V_th);
+    df = dfun3( estimatedTimeRight, v0, n0, u0, y0);
+  }
+
+  *cross = 4;
+  if (estimatedTimeRight<estimatedTimeLeft)
+  {
+    estimatedTimeLeft = estimatedTimeRight;
+    *cross = 5;
+  }
+  *t = estimatedTimeLeft;
+}
+
+__global__ void eventTimeZone1Kernel( const float4* pGlobal_state,
+                                      const unsigned short* pGlobalZone,
+                                      struct firing* pVal)
+{
+  unsigned int k = threadIdx.x + blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  (*pVal).time = 100000.0f;
+  if (correct_zone)
+  {
+    float4 local_state = pGlobal_state[k];
+    pVal[k].time  = eventTimeZone1(local_state.x,local_state.y,local_state.z,local_state.w);
+    pVal[k].index = k;
+    pVal[k].cross = 1;
+  }
+}
+
+__global__ void eventTimeZone2Kernel( const float4* pGlobal_state,
+                                      const unsigned short* pGlobalZone,
+                                      struct firing* pVal)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 2);
+  float4 local_state = pGlobal_state[k];
+  float local_time = 1000000.0f;
+  unsigned short cross;
+  if (correct_zone)
+  {
+    eventTimeZone2(local_state.x,local_state.y,local_state.z,local_state.w,&local_time,&cross);
+    pVal[k].time  = local_time;
+    pVal[k].index = k;
+    pVal[k].cross = cross;
+  }
+}
+
+__global__ void eventTimeZone3Kernel( const float4* pGlobal_state,
+                                      const unsigned short* pGlobalZone,
+                                      struct firing* pVal)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 3);
+  float4 local_state = pGlobal_state[k];
+  float local_time = 1000000.0f;
+  unsigned short cross;
+  if (correct_zone)
+  {
+    eventTimeZone3(local_state.x,local_state.y,local_state.z,local_state.w,&local_time,&cross);
+    pVal[k].time  = local_time;
+    pVal[k].index = k;
+    pVal[k].cross = cross;
+  }
+}
+
+__global__ void eventTimeZone4Kernel( const float *pRefractTime,
+                                      const unsigned short* pGlobalZone,
+                                      struct firing* pVal)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 4);
+  if (correct_zone)
+  {
+    pVal[k].time  = pRefractTime[k];
+    pVal[k].index = k;
+    pVal[k].cross = 6;
+  }
+}
+
+__global__ void updateStateKernel( float4* pGlobalState,
+                                   float* pRefractTimes,
+                                   const unsigned short* pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  float4 local_state = pGlobalState[k];
+  float refract_time = pRefractTimes[k];
+  local_state = updateState( local_state, eventTime, pGlobalZone[k]);
+  refract_time -= eventTime;
+
+  pGlobalState[k]  = local_state;
+  pRefractTimes[k] = refract_time*(refract_time>0.0f);
+}
+
+__global__ void updateZone1Kernel( float4* pGlobalState,
+                                   const unsigned int *pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  if (correct_zone)
+  {
+    float4 local_state = pGlobalState[k];
+    local_state = updateZone1( local_state, eventTime);
+    pGlobalState[k] = local_state;
+  }
+}
+
+__global__ void updateZone2Kernel( float4* pGlobalState,
+                                   const unsigned int *pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  if (correct_zone)
+  {
+    float4 local_state = pGlobalState[k];
+    local_state = updateZone2( local_state, eventTime);
+    pGlobalState[k] = local_state;
+  }
+}
+
+__global__ void updateZone3Kernel( float4* pGlobalState,
+                                   const unsigned int *pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  if (correct_zone)
+  {
+    float4 local_state = pGlobalState[k];
+    local_state = updateZone3( local_state, eventTime);
+    pGlobalState[k] = local_state;
+  }
+}
+
+__global__ void updateZone4Kernel( float4* pGlobalState,
+                                   const unsigned int *pGlobalZone,
+                                   const float eventTime)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  bool correct_zone  = (pGlobalZone[k] == 1);
+  if (correct_zone)
+  {
+    float4 local_state = pGlobalState[k];
+    local_state = updateZone4( local_state, eventTime);
+    pGlobalState[k] = local_state;
+  }
+}
 
 __global__ void ApplyResetKernel( float4* pGlobalState,
                                   unsigned int* pGlobalZone,
@@ -484,6 +793,150 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
     pRefractTime[index] = tau_r;
   }
 }
+
+__global__ void InitialiseKernel( float4* pGlobalState,
+                                  unsigned short* pGlobalZone)
+{
+  unsigned int k = threadIdx.x+blockDim.x*blockIdx.x;
+  float4 local_state = (float4){0.0f,0.0f,0.0f,0.0f};
+  pGlobalState[k] = local_state;
+  pGlobalZone[k]  = 2;
+}
+
+void updateZones( const struct firing* val,
+                  unsigned short* pGlobalZone,
+                  float4* pGlobalState,
+                  float* pRefractTime)
+{
+  unsigned int cross = (*val).cross;
+  unsigned int index = (*val).index;
+  unsigned short new_zone;
+  switch (cross)
+  {
+    case 1 :
+      new_zone = 2;
+      break;
+    case 2 :
+      new_zone = 1;
+      break;
+    case 3 :
+      new_zone = 3;
+      break;
+    case 4 :
+      new_zone = 2;
+      break;
+    case 5 :
+      new_zone = 4;
+      break;
+    case 6 :
+      new_zone = 2;
+      break;
+  }
+
+  // Update zone of neuron that fired
+  CUDA_CALL( cudaMemcpy( pGlobalZone+index, &new_zone, sizeof(short),
+        cudaMemcpyHostToDevice));
+
+  // If cell fired, need to reset voltage and send out synaptic input
+  if (cross==5)
+  {
+    ApplyResetKernel<<<(2*spatial_extent+noThreads-1)/noThreads,noThreads>>>
+      ( pGlobalState, index, pRefractTime);
+  }
+}
+
+int main( int argc , char *argv[])
+{
+  // Allocate memory
+  float4* p_global_state;
+  float* p_refract_time;
+  struct firing* p_firing_val;
+  struct firing* p_firing_val_temp;
+  struct firing* p_firing_pinned;
+  unsigned short* p_global_zone;
+
+  // Allocate memory
+  CUDA_CALL( cudaMalloc( &p_global_state, N*sizeof(float4)));
+  CUDA_CALL( cudaMalloc( &p_refract_time, N*sizeof(float)));
+  CUDA_CALL( cudaMalloc( &p_global_zone, N*sizeof(short)));
+  CUDA_CALL( cudaMalloc( &p_firing_val, N*sizeof(firing)));
+  CUDA_CALL( cudaMalloc( &p_firing_val_temp, noBlocks*sizeof(firing)));
+
+  // Pinned memory
+  CUDA_CALL( cudaMallocHost( (void**) &p_firing_pinned, sizeof(firing)));
+
+  InitialiseKernel<<<noBlocks,noThreads>>>( p_global_state, p_global_zone);
+
+  float final_time   = 100.0f;
+  float current_time = 0.0f;
+
+  while (current_time<final_time)
+  {
+    eventTimeZone1Kernel<<<noBlocks,noThreads>>>
+       (p_global_state,
+        p_global_zone,
+        p_firing_val);
+    CUDA_CHECK_ERROR();
+    eventTimeZone2Kernel<<<noBlocks,noThreads>>>
+       (p_global_state,
+        p_global_zone,
+        p_firing_val);
+    CUDA_CHECK_ERROR();
+    eventTimeZone3Kernel<<<noBlocks,noThreads>>>
+       (p_global_state,
+        p_global_zone,
+        p_firing_val);
+    CUDA_CHECK_ERROR();
+    eventTimeZone4Kernel<<<noBlocks,noThreads>>>
+      ( p_refract_time,
+        p_global_zone,
+        p_firing_val);
+    CUDA_CHECK_ERROR();
+
+    // Find minimum spike time
+    deviceReduceMinKernel<<<noBlocks,noThreads>>>
+      ( p_firing_val, N, p_firing_val_temp);
+    CUDA_CHECK_ERROR();
+    deviceReduceMinKernel<<<1,noThreads>>>
+      ( p_firing_val_temp, noBlocks, p_firing_val_temp);
+    CUDA_CHECK_ERROR();
+
+    // Update - assume transfer to page-locked memory
+    CUDA_CALL( cudaMemcpy( p_firing_pinned, p_firing_val, sizeof(firing),
+          cudaMemcpyDeviceToHost));
+    updateStateKernel<<<noBlocks,noThreads>>>
+      ( p_global_state, p_refract_time, p_global_zone, (*p_firing_pinned).time);
+    CUDA_CHECK_ERROR();
+
+    // Update zones
+    updateZones( p_firing_pinned, p_global_zone, p_global_state, p_refract_time);
+
+    // Update time
+    current_time += (*p_firing_pinned).time;
+  }
+
+  cudaFree( p_global_state);
+  cudaFree( p_global_zone);
+  cudaFree( p_refract_time);
+  cudaFree( p_firing_val);
+  cudaFree( p_firing_val_temp);
+
+  cudaFreeHost( p_firing_pinned);
+}
+
+__device__ float UpdateVoltageZone3( const float4 state, const float t)
+{
+    return (state.x*expf(-t/tau)
+      +(beta_right*gh*(tau-tau_h+tau_h*expf(-t/tau_h)))/(tau-tau_h)
+      -(beta_right*gh*tau*expf(-t/tau))/(tau-tau_h)
+      -(gh*state.y*tau_h*expf(-t/tau_h))/(tau-tau_h)
+      +(gh*state.y*tau_h*expf(-t/tau))/(tau-tau_h)
+      +(gs*expf(-alpha*t)*(alpha*tau*state.z-state.z-alpha*t*state.w+alpha*tau*state.w+alpha*alpha*t*tau*state.w))/powf(alpha*tau-1.0f,2)
+      -(gs*expf(-t/tau)*(alpha*tau*state.z-state.z+alpha*tau*state.w))/powf(alpha*tau-1.0f,2)
+      -I +I*exp(-t/tau));
+}
+
+//-------------------------------------------------------------------------------------------
 
 __device__ float FindSpikeTime( const float4 state)
 {
@@ -527,10 +980,10 @@ __global__ void FindSpikeTimeKernel( const float4* pGlobalState,
   }
 }
 
-void EventDrivenMap::FindMinimumSpikeTime( float timestep)
+void EventDrivenMap::FindMinimumSpikeTime()
 {
   FindSpikeTimeKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState, mpGlobalZone,
-                       mTime+timestep, mpFiringVal, mpEventNo);
+                       mTime+mDt, mpFiringVal, mpEventNo);
   CUDA_CHECK_ERROR();
 
   // Find minimum spike time
