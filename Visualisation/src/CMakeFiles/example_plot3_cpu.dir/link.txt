@@ -1,0 +1,1 @@
+/usr/bin/c++    -Wno-deprecated-declarations -Wno-unused-function -O3 -DNDEBUG    CMakeFiles/example_plot3_cpu.dir/cpu/plot3.cpp.o  -o cpu/plot3_cpu -rdynamic -lGLEWmx -lGL ../src/libforge.so -Wl,-rpath,/home/toor/forge/forge-master/src 

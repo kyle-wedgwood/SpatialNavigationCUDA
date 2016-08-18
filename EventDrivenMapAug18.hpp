@@ -4,7 +4,6 @@
 #include <iostream>
 #include <cstdlib>
 #include <cmath>
-#include <arrayfire.h>
 #include "parameters.h"
 #include "vector_types.h"
 
@@ -39,8 +38,6 @@ class EventDrivenMap
 
     void SimulateStep();
 
-    void SetXAxis( af::array* mpPlotVarX);
-
     struct __align__(8) firing
     {
       float time;
@@ -69,19 +66,11 @@ class EventDrivenMap
     unsigned int* mpEventNo;
     unsigned int* mpHost_eventNo;
 
-    // For plotting
-    af::Window* mpWindow;
-    af::array* mpPlotVarY;
-    af::array* mpPlotVarX;
-    float* mpPlotVarYHelper;
-
     float mTime;
     float mDt;
 
     void FindMinimumSpikeTime( float timestep);
     void CalculateSpatialExtent();
-    void SetPlottingWindow();
-    void PlotData();
 };
 
 // Initialise network
@@ -132,8 +121,5 @@ __global__ void ApplyResetKernel( float4* pGlobalState, unsigned int* pGlobalZon
 
 // Clear memory
 __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal, const unsigned int networkSize, const float stepSize);
-
-// Transfer data for plotting
-__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int networkSize);
 
 #endif

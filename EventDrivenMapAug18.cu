@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <cmath>
 #include <curand.h>
-#include <arrayfire.h>
 #include "parameters.h"
 #include "EventDrivenMap.hpp"
 #include "vector_types.h"
@@ -60,12 +59,6 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   mDx          = mDomainSize/(mNetworkSize-1);
   mDt          = (*pParameterList).timestep;
 
-  // For plotting
-  mpPlotVarX = new af::array(mNetworkSize,f32);
-  mpPlotVarY = new af::array(mNetworkSize,f32);
-  mpPlotVarYHelper = (*mpPlotVarY).device<float>();
-  SetXAxis( mpPlotVarX);
-
   CUDA_CALL( cudaMalloc( &mpGlobalState, mNetworkSize*mNetworkSize*sizeof(float4)));
   CUDA_CALL( cudaMalloc( &mpRefractTime, mNetworkSize*mNetworkSize*sizeof(float)));
   CUDA_CALL( cudaMalloc( &mpGlobalZone, mNetworkSize*mNetworkSize*sizeof(int)));
@@ -76,13 +69,10 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   CUDA_CALL( cudaMallocHost( &mpHost_eventNo, sizeof(int)));
 
   CalculateSpatialExtent();
-  SetPlottingWindow();
 }
 
 EventDrivenMap::~EventDrivenMap()
 {
-  (*mpPlotVarY).unlock();
-
   cudaFree( mpGlobalState);
   cudaFree( mpGlobalZone);
   cudaFree( mpRefractTime);
@@ -91,26 +81,21 @@ EventDrivenMap::~EventDrivenMap()
   cudaFree( mpEventNo);
   cudaFree( mpHost_firingVal);
   cudaFree( mpHost_eventNo);
-  cudaFree( mpPlotVarYHelper);
-
-  free( mpPlotVarX);
-  free( mpPlotVarY);
-  free( mpWindow);
 }
 
 void EventDrivenMap::SimulateNetwork( const float finalTime)
 {
   InitialiseNetwork();
 
-  do {
+  while (mTime<finalTime)
+  {
     SimulateStep();
 
     // Code to plot output
-    PlotData();
 
     // Prepare for next step
     mTime += mDt;
-  } while ((mTime<finalTime) & (!(*mpWindow).close()));
+  }
 }
 
 void EventDrivenMap::InitialiseNetwork()
@@ -189,38 +174,6 @@ void EventDrivenMap::SimulateStep()
       CUDA_CHECK_ERROR();
     }
     CUDA_CALL( cudaMemset( mpEventNo, 0, sizeof(int)));
-  }
-}
-
-void EventDrivenMap::SetXAxis( af::array* mpPlotVarX)
-{
-  *mpPlotVarX = af::range( mNetworkSize);
-  *mpPlotVarX *= 2*mDomainSize/(mNetworkSize);
-  *mpPlotVarX -= mDomainSize;
-  //for (int i=0;i<mNetworkSize;++i)
-  //{
-  //  (*mpPlotVarX)(i) = -mDomainSize+2*mDomainSize/(mNetworkSize)*i;
-  //}
-}
-
-void EventDrivenMap::SetPlottingWindow()
-{
-  mpWindow = new af::Window(mNetworkSize,512,"1D IF Network");
-}
-
-void EventDrivenMap::PlotData()
-{
-  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mNetworkSize);
-  (*mpWindow).plot( *mpPlotVarX, *mpPlotVarY);
-  (*mpWindow).show();
-}
-
-__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int networkSize)
-{
-  unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
-  if (index<networkSize)
-  {
-    pPlotVarY[index] = pGlobalState[index].x;
   }
 }
 
@@ -562,7 +515,7 @@ __device__ float FindSpikeTime( const float4 state)
 }
 
 __global__ void FindSpikeTimeKernel( const float4* pGlobalState,
-                                     const unsigned int* pGlobalZone,
+                                     const short* pGlobalZone,
                                      const float stepTime,
                                      EventDrivenMap::firing* pFiringVal,
                                      unsigned int* pEventNo)

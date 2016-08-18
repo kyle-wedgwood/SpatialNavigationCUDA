@@ -1,0 +1,1 @@
+/usr/bin/c++    -Wno-deprecated-declarations -Wno-unused-function -O3 -DNDEBUG    CMakeFiles/example_fractal_cuda.dir/cuda/./example_fractal_cuda_generated_fractal.cu.o  -o cuda/fractal_cuda -rdynamic /usr/local/cuda/lib64/libcudart.so /usr/local/cuda/lib64/libcudart.so ../src/libforge.so -Wl,-rpath,/usr/local/cuda/lib64:/home/toor/forge/forge-master/src 

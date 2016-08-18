@@ -1,0 +1,1 @@
+/usr/bin/c++    -Wno-deprecated-declarations -Wno-unused-function -O3 -DNDEBUG    CMakeFiles/example_histogram_cuda.dir/cuda/./example_histogram_cuda_generated_histogram.cu.o  -o cuda/histogram_cuda -rdynamic /usr/local/cuda/lib64/libcudart.so /usr/local/cuda/lib64/libcudart.so ../src/libforge.so -Wl,-rpath,/usr/local/cuda/lib64:/home/toor/forge/forge-master/src 

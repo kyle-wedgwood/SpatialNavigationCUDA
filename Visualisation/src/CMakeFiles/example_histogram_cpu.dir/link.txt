@@ -1,0 +1,1 @@
+/usr/bin/c++    -Wno-deprecated-declarations -Wno-unused-function -O3 -DNDEBUG    CMakeFiles/example_histogram_cpu.dir/cpu/histogram.cpp.o  -o cpu/histogram_cpu -rdynamic -lGLEWmx -lGL ../src/libforge.so -Wl,-rpath,/home/toor/forge/forge-master/src 
