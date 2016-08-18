@@ -17,13 +17,15 @@ class EventDrivenMap
     {
       ParameterList()
       {
-        networkSize = 1000;
+        networkSizeX = 1024;
+        networkSizeY = 1024;
         noThreads   = 1024;
         domainSize  = 120.0;
         timestep    = 0.1;
       }
 
-      unsigned int networkSize;
+      unsigned int networkSizeX;
+      unsigned int networkSizeY;
       unsigned int noThreads;
       float domainSize;
       float timestep;
@@ -39,8 +41,6 @@ class EventDrivenMap
 
     void SimulateStep();
 
-    void SetXAxis( af::array* mpPlotVarX);
-
     void PlotData();
 
     struct __align__(8) firing
@@ -54,6 +54,8 @@ class EventDrivenMap
     // Hiding default constructor
     EventDrivenMap();
 
+    unsigned int mNetworkSizeX;
+    unsigned int mNetworkSizeY;
     unsigned int mNetworkSize;
     unsigned int mNoThreads;
     unsigned int mNoBlocks;
@@ -73,9 +75,9 @@ class EventDrivenMap
 
     // For plotting
     af::Window* mpWindow;
-    af::array* mpPlotVarY;
-    af::array* mpPlotVarX;
-    float* mpPlotVarYHelper;
+    af::array* mpPlotVar;
+    af::array* mpPlotVarRGB;
+    float* mpPlotVarHelper;
 
     float mTime;
     float mDt;

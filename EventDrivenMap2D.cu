@@ -5,7 +5,7 @@
 #include <curand.h>
 #include <arrayfire.h>
 #include "parameters.h"
-#include "EventDrivenMap.hpp"
+#include "EventDrivenMap2D.hpp"
 #include "vector_types.h"
 
 #define CUDA_ERROR_CHECK
@@ -53,18 +53,19 @@ inline void __curandCall( curandStatus_t err, const char *file, const int line)
 EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
 {
 
-  mNetworkSize = (*pParameterList).networkSize;
-  mNoThreads   = (*pParameterList).noThreads;
-  mNoBlocks    = (mNetworkSize+mNoThreads-1)/mNoThreads;
-  mDomainSize  = (*pParameterList).domainSize;
-  mDx          = mDomainSize/(mNetworkSize-1);
-  mDt          = (*pParameterList).timestep;
+  mNetworkSizeX = (*pParameterList).networkSizeX;
+  mNetworkSizeY = (*pParameterList).networkSizeY;
+  mNetworkSize  = mNetworkSizeX*mNetworkSizeY;
+  mNoThreads    = (*pParameterList).noThreads;
+  mNoBlocks     = (mNetworkSize+mNoThreads-1)/mNoThreads;
+  mDomainSize   = (*pParameterList).domainSize;
+  mDx           = mDomainSize/(mNetworkSize-1);
+  mDt           = (*pParameterList).timestep;
 
   // For plotting
-  mpPlotVarX = new af::array(mNetworkSize,f32);
-  mpPlotVarY = new af::array(mNetworkSize,f32);
-  mpPlotVarYHelper = (*mpPlotVarY).device<float>();
-  SetXAxis( mpPlotVarX);
+  mpPlotVar    = new af::array(mNetworkSizeX,mNetworkSizeY,f32);
+  mpPlotVarRGB = new af::array(mNetworkSizeX,mNetworkSizeY,3,f32);
+  mpPlotVarHelper = (*mpPlotVar).device<float>();
 
   // Allocate memory for GPU variables
   CUDA_CALL( cudaMalloc( &mpGlobalState, mNetworkSize*sizeof(float4)));
@@ -86,7 +87,7 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
 
 EventDrivenMap::~EventDrivenMap()
 {
-  (*mpPlotVarY).unlock();
+  (*mpPlotVar).unlock();
 
   cudaFree( mpGlobalState);
   cudaFree( mpGlobalZone);
@@ -96,10 +97,10 @@ EventDrivenMap::~EventDrivenMap()
   cudaFree( mpEventNo);
   cudaFree( mpHost_firingVal);
   cudaFree( mpHost_eventNo);
-  cudaFree( mpPlotVarYHelper);
+  cudaFree( mpPlotVarHelper);
 
-  free( mpPlotVarX);
-  free( mpPlotVarY);
+  free( mpPlotVar);
+  free( mpPlotVarRGB);
   free( mpWindow);
 }
 
@@ -207,30 +208,21 @@ void EventDrivenMap::SimulateStep()
   }
 }
 
-void EventDrivenMap::SetXAxis( af::array* mpPlotVarX)
-{
-  *mpPlotVarX = af::range( mNetworkSize);
-  *mpPlotVarX *= 2*mDomainSize/(mNetworkSize);
-  *mpPlotVarX -= mDomainSize;
-  //for (int i=0;i<mNetworkSize;++i)
-  //{
-  //  (*mpPlotVarX)(i) = -mDomainSize+2*mDomainSize/(mNetworkSize)*i;
-  //}
-}
-
 void EventDrivenMap::SetPlottingWindow()
 {
-  mpWindow = new af::Window(mNetworkSize,512,"1D IF Network");
+  mpWindow = new af::Window(mNetworkSizeX,mNetworkSizeY,"2D IF Network");
+  mpWindow->setColorMap(AF_COLORMAP_SPECTRUM);
 }
 
 void EventDrivenMap::PlotData()
 {
-  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mNetworkSize);
+  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarHelper, mpGlobalState, mNetworkSize);
+  *mpPlotVarRGB = gray2rgb( *mpPlotVar);
   char str[50];
-  sprintf(str,"1D IF Network. Time = %f",mTime);
-  (*mpWindow).setTitle(str);
-  (*mpWindow).plot( *mpPlotVarX, *mpPlotVarY);
-  (*mpWindow).show();
+  sprintf(str,"2D IF Network. Time = %f",mTime);
+  mpWindow->setTitle(str);
+  mpWindow->image( *mpPlotVarRGB);
+  mpWindow->show();
 }
 
 __global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int networkSize)
@@ -238,7 +230,7 @@ __global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlo
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   if (index<networkSize)
   {
-    pPlotVarY[index] = pGlobalState[index].x;
+    pPlotVarY[index] = (pGlobalState[index].x-V_min)/(V_th-V_min);
   }
 }
 

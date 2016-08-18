@@ -32,3 +32,6 @@
 #define beta_centre  1.0f
 
 #define tol 1e-6
+
+// For plotting purposes
+#define V_min -80.0f

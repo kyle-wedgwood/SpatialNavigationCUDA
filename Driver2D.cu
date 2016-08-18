@@ -1,12 +1,13 @@
 #include <iostream>
 #include <cstdlib>
 #include <cmath>
-#include "EventDrivenMap.hpp"
+#include "EventDrivenMap2D.hpp"
 
 int main( int argc, char* argv[])
 {
   EventDrivenMap::ParameterList pars;
-  pars.networkSize = 1024;
+  pars.networkSizeX = 1024;
+  pars.networkSizeY = 1024;
   pars.noThreads   = 1024;
   pars.domainSize  = 120.0;
   pars.timestep    = 0.1;
