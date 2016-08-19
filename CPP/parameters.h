@@ -18,7 +18,7 @@
 #define W 1.0f // synaptic connection strength
 
 // h-current parameters
-#define gh  -3.0f*(-10.0f+65.0f) // 165.0f
+#define gh  165.0f // -3.0f*(-10.0f+65.0f) // 165.0f
 
 // synaptic current parameters
 #define gs -2.1f*(-85.0f+65.0f)

@@ -48,10 +48,10 @@ RM = /Applications/CMake.app/Contents/bin/cmake -E remove -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = "/Users/kcaw201/Dropbox/Spatial Navigation CUDA"
+CMAKE_SOURCE_DIR = "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CPP"
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = "/Users/kcaw201/Dropbox/Spatial Navigation CUDA"
+CMAKE_BINARY_DIR = "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CPP"
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -80,9 +80,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles" "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/progress.marks"
+	$(CMAKE_COMMAND) -E cmake_progress_start "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CPP/CMakeFiles" "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CPP/CMakeFiles/progress.marks"
 	$(MAKE) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles" 0
+	$(CMAKE_COMMAND) -E cmake_progress_start "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CPP/CMakeFiles" 0
 .PHONY : all
 
 # The main clean target
@@ -111,17 +111,44 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named Driver
+# Target rules for targets named testCudaCode
 
 # Build rule for target.
-Driver: cmake_check_build_system
-	$(MAKE) -f CMakeFiles/Makefile2 Driver
-.PHONY : Driver
+testCudaCode: cmake_check_build_system
+	$(MAKE) -f CMakeFiles/Makefile2 testCudaCode
+.PHONY : testCudaCode
 
 # fast build rule for target.
-Driver/fast:
-	$(MAKE) -f CMakeFiles/Driver.dir/build.make CMakeFiles/Driver.dir/build
-.PHONY : Driver/fast
+testCudaCode/fast:
+	$(MAKE) -f CMakeFiles/testCudaCode.dir/build.make CMakeFiles/testCudaCode.dir/build
+.PHONY : testCudaCode/fast
+
+testCUDACode.o: testCUDACode.cpp.o
+
+.PHONY : testCUDACode.o
+
+# target to build an object file
+testCUDACode.cpp.o:
+	$(MAKE) -f CMakeFiles/testCudaCode.dir/build.make CMakeFiles/testCudaCode.dir/testCUDACode.cpp.o
+.PHONY : testCUDACode.cpp.o
+
+testCUDACode.i: testCUDACode.cpp.i
+
+.PHONY : testCUDACode.i
+
+# target to preprocess a source file
+testCUDACode.cpp.i:
+	$(MAKE) -f CMakeFiles/testCudaCode.dir/build.make CMakeFiles/testCudaCode.dir/testCUDACode.cpp.i
+.PHONY : testCUDACode.cpp.i
+
+testCUDACode.s: testCUDACode.cpp.s
+
+.PHONY : testCUDACode.s
+
+# target to generate assembly for a file
+testCUDACode.cpp.s:
+	$(MAKE) -f CMakeFiles/testCudaCode.dir/build.make CMakeFiles/testCudaCode.dir/testCUDACode.cpp.s
+.PHONY : testCUDACode.cpp.s
 
 # Help Target
 help:
@@ -131,7 +158,10 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... Driver"
+	@echo "... testCudaCode"
+	@echo "... testCUDACode.o"
+	@echo "... testCUDACode.i"
+	@echo "... testCUDACode.s"
 .PHONY : help
 
 

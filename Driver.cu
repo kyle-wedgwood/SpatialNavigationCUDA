@@ -13,9 +13,9 @@ int main( int argc, char* argv[])
 
   EventDrivenMap* p_event = new EventDrivenMap( &pars);
 
-  float simulation_time = 100.0f;
-  p_event->InitialiseNetwork();
-  p_event->SimulateStep();
+  float simulation_time = 1000.0f;
+  //p_event->InitialiseNetwork();
+  //p_event->SimulateStep();
   p_event->SimulateNetwork( simulation_time);
 
   delete(p_event);

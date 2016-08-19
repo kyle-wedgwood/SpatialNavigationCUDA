@@ -21,12 +21,14 @@ class EventDrivenMap
         noThreads   = 1024;
         domainSize  = 120.0;
         timestep    = 0.1;
+        printOutput = 0;
       }
 
       unsigned int networkSize;
       unsigned int noThreads;
       float domainSize;
       float timestep;
+      bool printOutput;
     };
 
     EventDrivenMap( const ParameterList* pParameterList);
@@ -60,6 +62,7 @@ class EventDrivenMap
     float mDomainSize;
     float mDx;
     unsigned int mSpatialExtent;
+    bool mPrintOutput;
 
     float4* mpGlobalState;
     float* mpRefractTime;
