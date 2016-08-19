@@ -172,15 +172,6 @@ void EventDrivenMap::SimulateStep()
       printf("Taking step of size %f\n",(*mpHost_firingVal).time);
 
     // Update all cells
-    if ((*mpHost_firingVal).time>tol)
-    {
-      UpdateStateKernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
-          mpGlobalState, mpGlobalZone, mpRefractTime, mNetworkSize);
-      CUDA_CHECK_ERROR();
-      if (mPrintOutput)
-        printf("Updated neuron states.\n");
-    }
-    /*
     UpdateZone1Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
        mpGlobalState, mpGlobalZone);
     if (mPrintOutput)
@@ -201,7 +192,6 @@ void EventDrivenMap::SimulateStep()
     CUDA_CHECK_ERROR();
     if (mPrintOutput)
       printf("Updated neurons in zone 4.\n");
-    */
 
     // Update time
     local_time += (*mpHost_firingVal).time;
@@ -272,38 +262,34 @@ __global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlo
 
 __global__ void UpdateStateKernel( const float eventTime,
                                    float4* pGlobalState,
-                                   unsigned int* pGlobalZone,
-                                   float* pRefractTime,
-                                   const unsigned int networkSize)
+                                   unsigned int* pGlobalZone)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   unsigned int local_zone;
   float4 local_state;
-  short change_flag = 0;
-  if (index<networkSize)
+  short changeFlag = 0;
+  if (index<mNetworkSize)
   {
     local_zone  = pGlobalZone[index];
-    local_state = pGlobalState[index];
+    local_state = pGlobalState[index]
     if (local_zone==1)
     {
-      local_state = UpdateZone1( eventTime, local_state, &change_flag);
+      local_state = UpdateZone1( eventTime, local_state);
     }
     if (local_zone==2)
     {
-      local_state = UpdateZone2( eventTime, local_state, &change_flag);
+      local_state = UpdateZone2( eventTime, local_state);
     }
     if (local_zone==3)
     {
-      local_state = UpdateZone3( eventTime, local_state, &change_flag);
+      local_state = UpdateZone3( eventTime, local_state);
     }
     if (local_zone==4)
     {
-      float local_refract_time = pRefractTime[index];
-      local_state = UpdateZone4( eventTime, local_state, &local_refract_time, &change_flag);
-      pRefractTime[index] = local_refract_time;
+      local_state = UpdateZone4( eventTime, local_state);
     }
     pGlobalState[index] = local_state;
-    pGlobalZone[index]  = local_zone+change_flag;
+    pGlobalZone[index]  = local_zone+changeFlag;
   }
 }
 
@@ -315,21 +301,20 @@ __global__ void UpdateZone1Kernel( const float eventTime,
   if (pGlobalZone[index]==1)
   {
     float4 local_state = pGlobalState[index];
-    //local_state = UpdateZone1( eventTime, local_state);
+    local_state = UpdateZone1( eventTime, local_state);
     pGlobalState[index] = local_state;
     pGlobalZone[index] += (local_state.x>V_left);
   }
 }
 
 __device__ float4 UpdateZone1( float eventTime,
-                               float4 state,
-                               short* pChangeFlag)
+                               float4 state)
 {
   float crossTime = eventTime;
-  short changeZoneFlag = 0;
+  unsigned short changeZoneFlag = 0;
   float v = fun1( crossTime, state.x, state.y, state.z, state.w, 0.0f);
   if (threadIdx.x==0)
-    printf("Voltage = %f\n",v);
+    printf("v = %f\n",v);
   if (v > V_left)
   {
     changeZoneFlag = 1;
@@ -351,8 +336,6 @@ __device__ float4 UpdateZone1( float eventTime,
     state.x = V_left;
     state = UpdateStateZone2( eventTime-crossTime, state);
   }
-
-  *pChangeFlag = changeZoneFlag; // NOTE: since we are defining change_flags if the function that calls this one, we don't actually need another variable here. This is mostly to protect against failure to define variables
   return state;
 }
 
@@ -384,7 +367,7 @@ __global__ void UpdateZone2Kernel( const float eventTime,
     float4 local_state = pGlobalState[index];
 
     // Update state
-    //local_state = UpdateZone2( eventTime, local_state);
+    local_state = UpdateZone2( eventTime, local_state);
     pGlobalState[index] = local_state;
 
     // Update zone
@@ -397,8 +380,7 @@ __global__ void UpdateZone2Kernel( const float eventTime,
 }
 
 __device__ float4 UpdateZone2( float eventTime,
-                               float4 state,
-                               short* pChangeFlag)
+                               float4 state)
 {
   float crossTime = eventTime;
   short changeZoneFlag = 0;
@@ -444,8 +426,6 @@ __device__ float4 UpdateZone2( float eventTime,
   }
   if (threadIdx.x==0)
     printf("Voltage = %f.\n",state.x);
-
-  *pChangeFlag = changeZoneFlag; // NOTE: See note for UpdateZone1
   return state;
 }
 
@@ -474,7 +454,7 @@ __global__ void UpdateZone3Kernel( const float eventTime,
     float4 local_state = pGlobalState[index];
 
     // Update state
-    //local_state = UpdateZone3( eventTime, local_state);
+    local_state = UpdateZone3( eventTime, local_state);
     pGlobalState[index] = local_state;
 
     // Update zone
@@ -483,15 +463,14 @@ __global__ void UpdateZone3Kernel( const float eventTime,
 }
 
 __device__ float4 UpdateZone3( float eventTime,
-                               float4 state,
-                               short* pChangeFlag)
+                               float4 state)
 {
   float crossTime = eventTime;
-  short changeZoneFlag = 0;
+  unsigned short changeZoneFlag = 0;
   float v = fun3( crossTime, state.x, state.y, state.z, state.w, 0.0f);
   if (v < V_right)
   {
-    changeZoneFlag = -1;
+    changeZoneFlag = 1;
     v  = fun3( crossTime, state.x, state.y, state.z, state.w, V_right);
     float dv = dfun3( crossTime, state.x, state.y, state.z, state.w);
     while (fabs(v)>tol)
@@ -502,13 +481,11 @@ __device__ float4 UpdateZone3( float eventTime,
     }
   }
   state = UpdateStateZone3( crossTime, state);
-  if (changeZoneFlag==-1)
+  if (changeZoneFlag)
   {
     state.x = V_right;
     state = UpdateStateZone2( eventTime-crossTime, state);
   }
-
-  *pChangeFlag = changeZoneFlag; // NOTE: See note for UpdateZone1
   return state;
 }
 
@@ -526,29 +503,6 @@ __device__ float4 UpdateStateZone3( float t, float4 state)
   state.y = (beta_right*(1.0f-expf(-t/tau_h))+state.y*expf(-t/tau_h));
   state.z = (state.z+alpha*state.w*t)*expf(-alpha*t);
   state.w = state.w*expf(-alpha*t);
-  return state;
-}
-
-__device__ float4 UpdateZone4( const float eventTime,
-                               float4 state,
-                               float* pRefractTime,
-                               short* pChangeFlag)
-{
-  float local_refract_time = *pRefractTime;
-  short local_change_flag = 0;
-  float sim_time = min( *pRefractTime, eventTime);
-
-  state = UpdateStateZone4( sim_time, state);
-  local_refract_time -= eventTime;
-  if (local_refract_time<0.0f)
-  {
-    state = UpdateStateZone2( -local_refract_time, state);
-    local_refract_time = 0.0f;
-    local_change_flag  = -2;
-  }
-
-  *pRefractTime = local_refract_time;
-  *pChangeFlag  = local_change_flag;
   return state;
 }
 

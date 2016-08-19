@@ -28,8 +28,8 @@
 
 #define V_left  -25.0f
 #define V_right  5.0f
-#define gamma_centre -0.0333f
-#define beta_centre 0.1067f
+#define gamma_centre  (beta_right-beta_left)/(V_right-V_left) // -0.0333f
+#define beta_centre (-gamma_centre*V_left+beta_left) // 0.1067f
 
 #define tol 1e-6
 

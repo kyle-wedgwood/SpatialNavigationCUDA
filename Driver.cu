@@ -10,6 +10,7 @@ int main( int argc, char* argv[])
   pars.noThreads   = 1024;
   pars.domainSize  = 120.0;
   pars.timestep    = 0.1;
+  pars.printOutput = 0;
 
   EventDrivenMap* p_event = new EventDrivenMap( &pars);
 
