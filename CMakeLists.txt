@@ -9,6 +9,8 @@ if (APPLE)
 else()
   link_directories( /usr/local/share/arrayfire-3/lib
                     /usr/local/lib)
+                  set( CMAKE_INCLUDE_PATH
+                    "/usr/local/share/arrayfire-3/include/;${CMAKE_INCLUDE_PATH}")
 endif()
 
 cuda_add_executable( Driver
