@@ -61,7 +61,6 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   mDomainSize  = (*pParameterList).domainSize;
   mDx          = 2.0f*mDomainSize/(mNetworkSize);
   mDt          = (*pParameterList).timestep;
-  mPlotFreq    = (*pParameterList).plotFreq;
   mPrintOutput = (*pParameterList).printOutput;
 
   // For plotting
@@ -75,11 +74,12 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   CUDA_CALL( cudaMalloc( &mpRefractTime, mNetworkSize*sizeof(float)));
   CUDA_CALL( cudaMalloc( &mpGlobalZone, mNetworkSize*sizeof(int)));
   CUDA_CALL( cudaMalloc( &mpFiringVal, mNetworkSize*sizeof(firing)));
+  CUDA_CALL( cudaMalloc( &mpFiringValTemp, mNoBlocks*sizeof(firing)));
   CUDA_CALL( cudaMalloc( &mpEventNo, sizeof(int)));
   CUDA_CALL( cudaMallocHost( &mpHost_eventNo, sizeof(int)));
 
   // Allocate memory for CPU variables
-  CUDA_CALL( cudaMallocHost( &mpHost_firingVal, sizeof(firing)));
+  mpHost_firingVal = (firing*) malloc(sizeof(firing));
 
   // Set applied curent to zero
   SetAppliedCurrent( 0.0f);
@@ -98,6 +98,7 @@ EventDrivenMap::~EventDrivenMap()
   cudaFree( mpGlobalZone);
   cudaFree( mpRefractTime);
   cudaFree( mpFiringVal);
+  cudaFree( mpFiringValTemp);
   cudaFree( mpEventNo);
   cudaFree( mpHost_firingVal);
   cudaFree( mpHost_eventNo);
@@ -121,6 +122,7 @@ void EventDrivenMap::SimulateNetwork( const float finalTime, bool extend)
   unsigned int counter = 0;
   if (!extend)
   {
+    printf("Hello\n");
     InitialiseNetwork();
   }
 
@@ -129,7 +131,7 @@ void EventDrivenMap::SimulateNetwork( const float finalTime, bool extend)
     SimulateStep();
 
     // Code to plot output
-    if (counter%mPlotFreq==0)
+    if (counter%100==0)
     {
       PlotData();
     }
@@ -150,7 +152,7 @@ void EventDrivenMap::InitialiseNetwork()
   InitialiseNetworkKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState,
     mpGlobalZone, mNetworkSize);
   CUDA_CHECK_ERROR();
-  ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mDt);
+  ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mpFiringValTemp, mNoBlocks, mDt);
   CUDA_CHECK_ERROR();
   printf("Network initialised.\n");
 }
@@ -196,8 +198,9 @@ void EventDrivenMap::SimulateStep()
     // First, find spiking cell
     CUDA_CALL( cudaMemset( mpEventNo, 0, sizeof(int)));
     FindMinimumSpikeTime( mDt-local_time);
-
-    CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringVal, sizeof(firing), cudaMemcpyDeviceToHost));
+    if (mPrintOutput)
+      printf("Found any spikes times.\n");
+    CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringValTemp, sizeof(firing), cudaMemcpyDeviceToHost));
     if (mPrintOutput)
       printf("Taking step of size %f\n",(*mpHost_firingVal).time);
 
@@ -210,30 +213,38 @@ void EventDrivenMap::SimulateStep()
       if (mPrintOutput)
         printf("Updated neuron states.\n");
     }
+    /*
+    UpdateZone1Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+       mpGlobalState, mpGlobalZone);
+    if (mPrintOutput)
+      printf("Updated neurons in zone 1.\n");
+    CUDA_CHECK_ERROR();
+    UpdateZone2Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+       mpGlobalState, mpGlobalZone);
+    if (mPrintOutput)
+      printf("Updated neurons in zone 2.\n");
+    CUDA_CHECK_ERROR();
+    UpdateZone3Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+       mpGlobalState, mpGlobalZone);
+    if (mPrintOutput)
+      printf("Updated neurons in zone 3.\n");
+    CUDA_CHECK_ERROR();
+    UpdateZone4Kernel<<<mNoBlocks,mNoThreads>>>( (*mpHost_firingVal).time,
+       mpGlobalState, mpGlobalZone, mpRefractTime);
+    CUDA_CHECK_ERROR();
+    if (mPrintOutput)
+      printf("Updated neurons in zone 4.\n");
+    */
 
     // Update time
     local_time += (*mpHost_firingVal).time;
 
     // Reset neuron that fired
-    //if (*mpHost_eventNo>0)
-    //{
-    //  ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpGlobalState,
-    //      mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
-    //  CUDA_CHECK_ERROR();
-    //}
-
-    // Reset neuron that fired
-    float spike_time = (*mpHost_firingVal).time;
-    for (int i=0;i<*mpHost_eventNo;++i)
+    if (*mpHost_eventNo>0)
     {
-      if (fabs((*mpHost_firingVal).time-spike_time)<tol)
-      {
-        ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpGlobalState,
-            mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
-        CUDA_CHECK_ERROR();
-        CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringVal+i, sizeof(firing),
-              cudaMemcpyDeviceToHost));
-      }
+      ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpGlobalState,
+          mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
+      CUDA_CHECK_ERROR();
     }
 
     // Reset memory
@@ -241,12 +252,12 @@ void EventDrivenMap::SimulateStep()
     {
       if (*mpHost_eventNo==0)
       {
-        ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mDt);
+        ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mpFiringValTemp, mNoBlocks, mDt);
         CUDA_CHECK_ERROR();
       }
       else
       {
-        ResetMemoryKernel<<<(*mpHost_eventNo+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpFiringVal, *mpHost_eventNo, mDt-local_time);
+        ResetMemoryKernel<<<(*mpHost_eventNo+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpFiringVal, *mpHost_eventNo, mpFiringValTemp, mNoBlocks, mDt-local_time);
         CUDA_CHECK_ERROR();
       }
     }
@@ -643,6 +654,8 @@ __device__ float4 UpdateStateZone4( float t, float4 state)
 
 __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal,
                                    const unsigned int resetSize,
+                                   EventDrivenMap::firing *pFiringValTemp,
+                                   const unsigned int resetSizeTemp,
                                    const float stepSize)
 {
   unsigned int index =  threadIdx.x+blockDim.x*blockIdx.x;
@@ -650,6 +663,11 @@ __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal,
   {
     pFiringVal[index].time  = stepSize;
     pFiringVal[index].index = 0;
+  }
+  if (index<resetSizeTemp)
+  {
+    pFiringValTemp[index].time  = stepSize;
+    pFiringValTemp[index].index = 0;
   }
 }
 
@@ -789,12 +807,14 @@ void EventDrivenMap::FindMinimumSpikeTime( float timestep)
 
   if (*mpHost_eventNo>0)
   {
+    deviceReduceMinKernel<<<mNoBlocks,mNoThreads>>>
+      ( mpFiringVal, *mpEventNo, mpFiringValTemp);
+    CUDA_CHECK_ERROR();
     deviceReduceMinKernel<<<1,mNoThreads>>>
-      ( *mpHost_eventNo, mpFiringVal);
+      ( mpFiringValTemp, mNoBlocks, mpFiringValTemp);
     CUDA_CHECK_ERROR();
   }
 }
-
 
 __inline__ __device__ EventDrivenMap::firing warpReduceMin( EventDrivenMap::firing val)
 {
@@ -834,28 +854,26 @@ __inline__ __device__ struct EventDrivenMap::firing blockReduceMin( EventDrivenM
   return val;
 }
 
-__global__ void deviceReduceMinKernel( const unsigned int npts,
-                                       EventDrivenMap::firing* pFiringVal)
+__global__ void deviceReduceMinKernel( const EventDrivenMap::firing* in,
+                                       const unsigned int npts,
+                                       EventDrivenMap::firing* out)
 {
-  float time = 100.0f;
+  float time = 1000000.0f;
   struct EventDrivenMap::firing dummy;
-  struct EventDrivenMap::firing val = (EventDrivenMap::firing){100.0f,0};
+  struct EventDrivenMap::firing val;
   //reduce multiple elements per thread
-  for (int i=threadIdx.x;i<npts;i+=blockDim.x)
+  for (int i=blockIdx.x*blockDim.x+threadIdx.x;i<npts;i+=blockDim.x*gridDim.x)
   {
-    if (i<npts)
+    dummy = in[i];
+    if (dummy.time < time)
     {
-      dummy = pFiringVal[i];
-      if (dummy.time < time)
-      {
-        val  = dummy;
-        time = dummy.time;
-      }
+      val  = dummy;
+      time = dummy.time;
     }
   }
   val = blockReduceMin( val);
   if (threadIdx.x==0)
   {
-    pFiringVal[threadIdx.x] = val;
+    out[blockIdx.x] = val;
   }
 }

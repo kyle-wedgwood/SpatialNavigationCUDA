@@ -62,6 +62,9 @@ class EventDrivenMap
     float mDomainSize;
     float mDx;
     unsigned int mSpatialExtent;
+    int mpStencilX;
+    int mpStencilY;
+    unsigned int mHost_stencilSize;
 
     float4* mpGlobalState;
     float* mpRefractTime;
@@ -131,7 +134,10 @@ __global__ void UpdateZone4Kernel( const float eventTime, float4* pGlobalState, 
 __device__ float4 UpdateStateZone4( float t, float4 state);
 
 // Update synaptic input to cells
-__global__ void ApplyResetKernel( float4* pGlobalState, unsigned int* pGlobalZone, unsigned int index, float* pRefractTime, float dx, unsigned int spatial_extent);
+__global__ void ApplyResetKernel( float4* pGlobalState, unsigned int*
+    pGlobalZone, unsigned int index, float* pRefractTime, float dx, int*
+    pStencilX, int* pStencilY, unsigned int stencilSize, unsigned int
+    networkSizeX, unsigned int networkSizeY);
 
 // Clear memory
 __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal, const unsigned int resetSize, EventDrivenMap::firing* pFiringValTemp, const unsigned int resetSizeTemp, const float stepSize);

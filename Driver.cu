@@ -3,6 +3,8 @@
 #include <cmath>
 #include "EventDrivenMap.hpp"
 
+using namespace std;
+
 int main( int argc, char* argv[])
 {
   EventDrivenMap::ParameterList pars;
@@ -10,14 +12,29 @@ int main( int argc, char* argv[])
   pars.noThreads   = 1024;
   pars.domainSize  = 120.0;
   pars.timestep    = 0.1;
-  pars.printOutput = 0;
+  pars.plotFreq    = 10;
+  pars.printOutput = 1;
 
   EventDrivenMap* p_event = new EventDrivenMap( &pars);
 
-  float simulation_time = 1000.0f;
-  //p_event->InitialiseNetwork();
-  //p_event->SimulateStep();
+  float simulation_time = 500.0f;
+  bool extend_simulation = true;
+
+  // First simulate to settle at steady state
   p_event->SimulateNetwork( simulation_time);
+  cout<< "Transient simulation finished" << endl;
+
+  // Now hyperpolarise subset of cells
+  cout<< "Hyperpolarising some cells" << endl;
+  p_event->SetAppliedCurrent( -30.0f);
+  simulation_time += 250.0f;
+  p_event->SimulateNetwork( simulation_time, extend_simulation);
+
+  // Remove applied current
+  cout<< "Removing hyperpolarising current" << endl;
+  p_event->SetAppliedCurrent( 0.0f);
+  simulation_time += 100000.f;
+  p_event->SimulateNetwork( simulation_time, extend_simulation);
 
   delete(p_event);
 

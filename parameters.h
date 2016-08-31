@@ -1,37 +1,63 @@
 // connectivity parameters
-#define N 1000
 #define sigma  25.0f
+#define w0 10.0f // synaptic connection strength
+#define beta 0.5f
+#define spatial_cutoff 1e-8
 
-// spatial parameters
-#define L 250.0f
+// REFFRACTORY TIMESCALE
+#define tau_r 200.0f //refractoriness constant
 
-// alpha function
-#define alpha 0.5f
+// Voltage equation parameters
+// CONDUCTANCES
+#define gh_steve 1.0f
+#define gs_steve 15.0f
+#define gl_steve 0.25f
 
-// model parameters
-#define tau 1.0f //time constant
-#define tau_h 417.0f //time constant
-#define tau_r 20.0f //refractoriness constant
-#define I  0.01f //constant current
-#define V_th 6.5f //threshold
+// TIMESCALES
+#define C_steve 1.0f //time constant
+#define tau_h_steve 400.0f //time constant
+
+// INPUT
+#define I_steve  0.01f //constant current
+
+// RESET
+#define V_th 14.5f //threshold
 #define V_r  0.0f //reset
-#define W 1.0f // synaptic connection strength
 
-// h-current parameters
-#define gh  -3.0f*(-10.0f+65.0f) // 165.0f
+// REVERSAL POTENTIAL
+#define V_h_steve 40.f
 
-// synaptic current parameters
-#define gs -2.1f*(-85.0f+65.0f)
+// RESCALING
+#define tau (C_steve/gl_steve)
+#define gs (-gs_steve/gl_steve)
+#define gh (gh_steve*V_h_steve/gl_steve)
+//#define I (-I_steve/gl_steve)
 
-#define beta_left  0.94f
-#define beta_right  -0.06f
+// Gating equation parameters
 
-#define V_left  -25.0f
-#define V_right  5.0f
-#define gamma_centre  (beta_right-beta_left)/(V_right-V_left) // -0.0333f
-#define beta_centre (-gamma_centre*V_left+beta_left) // 0.1067f
+// TIMESCALE
+#define tau_h 400.0f //time constant
 
-#define tol 1e-6
+// SWITCHES
+#define V_half  -10.0f
+#define V_k 10.0f
+#define V_left (V_half-2*V_k)
+#define V_right (V_half+2*V_k)
+
+#define beta_left 1.0f
+#define beta_right  0.0f
+#define beta_centre (0.5f+V_half/(4*V_k))
+#define gamma_centre (-1.0f/(4*V_k))
+
+// ALPHA FUNCTION TIMESCALE
+#define alpha 0.05f
+
+// Newton solver
+#define tol 1e-5
+
+// APPLIED CURRENT PARAMETERS
+#define I_app_first 0
+#define I_app_last 250
 
 // For plotting purposes
 #define V_min -80.0f

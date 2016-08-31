@@ -81,6 +81,7 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
 
   // Set some other options
   CalculateSpatialExtent();
+  CreateCouplingStencil();
   SetPlottingWindow();
   printf("Created network object with %d neurons.\n",mNetworkSize);
 }
@@ -98,6 +99,8 @@ EventDrivenMap::~EventDrivenMap()
   cudaFree( mpHost_firingVal);
   cudaFree( mpHost_eventNo);
   cudaFree( mpPlotVarHelper);
+  cudaFree( mpStencilX);
+  cudaFree( mpStencilY);
 
   free( mpPlotVar);
   free( mpPlotVarRGB);
@@ -150,6 +153,35 @@ void EventDrivenMap::CalculateSpatialExtent()
   mSpatialExtent = (int) (sigma/mDx);
 }
 
+void EventDrivenMap::CreateCouplingStencil()
+{
+  int row, col;
+  unsigned int n = 0;
+  int buffer = 2*mSpatialExtent+1;
+  int host_row_index[buffer*buffer];
+  int host_col_index[buffer*buffer];
+  for (row=-mSpatialExtent;row<=mSpatialExtent;++row)
+  {
+    for (col=-mSpatialExtent;col<=mSpatialExtent;++col)
+    {
+      if (row*row*mDx*mDx+col*col*mDx*mDx<sigma*sigma)
+      {
+        host_row_index[n] = row;
+        host_col_index[n] = col;
+        n++;
+      }
+    }
+  }
+  n--;
+  CUDA_CALL( crdaMalloc( &mpStencilX, n*sizeof(int)));
+  CUDA_CALL( cudaMalloc( &mpStencilY, n*sizeof(int)));
+  CUDA_CALL( cudaMemcpy( mpStencilX, host_row_index, n*sizeof(int),
+        cudaMemcpyDeviceToHost));
+  CUDA_CALL( cudaMemcpy( mpStencilY, host_col_index, n*sizeof(int),
+        cudaMemcpyDeviceToHost));
+  mHost_stencilSize = n;
+}
+
 void EventDrivenMap::SimulateStep()
 {
   float local_time = 0.0f;
@@ -188,7 +220,9 @@ void EventDrivenMap::SimulateStep()
     if (*mpHost_eventNo>0)
     {
       ApplyResetKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState,
-          mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
+          mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx,
+          mpStencilX, mpStencilY, mHost_stencilSize, mNetworkSizeX,
+          mNetworkSizeY);
       CUDA_CHECK_ERROR();
     }
 
@@ -549,19 +583,37 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
                                   unsigned int index,
                                   float* pRefractTime,
                                   float dx,
-                                  unsigned int spatial_extent)
+                                  int* pStencilX,
+                                  int* pStencilY,
+                                  unsigned int stencilSize,
+                                  unsigned int networkSizeX,
+                                  unsigned int networkSizeY)
 {
-  int k = threadIdx.x+blockDim.x*blockIdx.x+index-spatial_extent;
-  if ((k>=0)&&(k<N))
+  int k = threadIdx.x+blockDim.x*blockIdx.x;
+  if (k<stencilSize)
   {
-    pGlobalState[k].w += alpha*W*dx;
-  }
-  if (threadIdx.x==0)
-  {
-    pGlobalState[index].x = V_r;
-    pGlobalZone [index] = 2;
-    pRefractTime[index] = tau_r;
-  }
+    int x_index = k % networkSizeX;
+    int y_index = k/networkSizeX;
+    int local_stencil_x = pStencilX[k];
+    int local_stencil_y = pStencilY[k];
+    x_index += local_stencil_x;
+    y_index += local_stencil_y;
+    if ( !( (x_index<0) ||
+            (x_index>=networkSizeX) ||
+            (y_index<0) ||
+            (y_index>=networkSizeY)
+          )
+       )
+    {
+      k = index+local_stencil_x*networkSizeX+local_stencil_y;
+      pGlobalState[k].w += alpha*W*dx;
+    }
+    if (threadIdx.x==0)
+    {
+      pGlobalState[index].x = V_r;
+      pGlobalZone [index] = 2;
+      pRefractTime[index] = tau_r;
+    }
 }
 
 __device__ float FindSpikeTime( const float4 state)
