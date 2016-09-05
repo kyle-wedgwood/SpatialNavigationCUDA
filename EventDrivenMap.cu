@@ -719,7 +719,7 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
   if (threadIdx.x==0)
   {
     pGlobalState[firingIndex].x = V_r;
-    pGlobalZone [firingIndex] = 2;
+    pGlobalZone [firingIndex] = 4;
     pRefractTime[firingIndex] = tau_r;
   }
 }
