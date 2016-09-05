@@ -18,7 +18,7 @@
 #define tau_h_steve 400.0f //time constant
 
 // INPUT
-#define I_steve  0.01f //constant current
+#define I_steve  0.00f //constant current
 
 // RESET
 #define V_th 14.5f //threshold
@@ -29,7 +29,7 @@
 
 // RESCALING
 #define tau (C_steve/gl_steve)
-#define gs (-gs_steve/gl_steve)
+#define gs (gs_steve/gl_steve)
 #define gh (gh_steve*V_h_steve/gl_steve)
 //#define I (-I_steve/gl_steve)
 
@@ -57,7 +57,7 @@
 
 // APPLIED CURRENT PARAMETERS
 #define I_app_first 0
-#define I_app_last 250
+#define I_app_last 100
 
 // For plotting purposes
 #define V_min -80.0f

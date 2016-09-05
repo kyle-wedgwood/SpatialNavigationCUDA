@@ -97,7 +97,7 @@ class EventDrivenMap
 };
 
 // Initialise network
-__global__ void InitialiseNetworkKernel( float4* pGlobalState, unsigned int* pGlobalZone, unsigned int networkSize);
+__global__ void InitialiseNetworkKernel( float4* pGlobalState, unsigned int* pGlobalZone, float* pRefractTime, unsigned int networkSize);
 
 // Functions to find minimum spike time
 __device__ float FindSpikeTime( const float4 state, const float local_I);
@@ -150,6 +150,6 @@ __global__ void ApplyResetKernel( float4* pGlobalState, unsigned int* pGlobalZon
 __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal, const unsigned int resetSize, const float stepSize);
 
 // Transfer data for plotting
-__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int* pGlobalZone, const unsigned int networkSize);
+__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int* pGlobalZone, const float* pRefractTime, const unsigned int networkSize);
 
 #endif

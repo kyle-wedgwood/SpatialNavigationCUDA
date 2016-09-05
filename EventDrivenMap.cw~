@@ -160,7 +160,7 @@ void EventDrivenMap::InitialiseNetwork()
 {
   mTime = 0.0f;
   InitialiseNetworkKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState,
-    mpGlobalZone, mpRefractTime, mNetworkSize);
+    mpGlobalZone, mNetworkSize);
   CUDA_CHECK_ERROR();
   ResetMemoryKernel<<<mNoBlocks,mNoThreads>>>( mpFiringVal, mNetworkSize, mDt);
   CUDA_CHECK_ERROR();
@@ -169,7 +169,6 @@ void EventDrivenMap::InitialiseNetwork()
 
 __global__ void InitialiseNetworkKernel( float4* pGlobalState,
                                          unsigned int* pGlobalZone,
-					 float* pRefractTime,
                                          unsigned int networkSize)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
@@ -182,7 +181,6 @@ __global__ void InitialiseNetworkKernel( float4* pGlobalState,
     pGlobalState[index].z = 0.0f;
     pGlobalState[index].w = 0.0f;
     pGlobalZone[index] = 2;
-    pRefractTime[index] = 200.0f;
   }
 }
 
@@ -245,7 +243,7 @@ void EventDrivenMap::SimulateStep()
         ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpGlobalState,
             mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
         CUDA_CHECK_ERROR();
-        CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringVal+i+1, sizeof(firing),
+        CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringVal+i, sizeof(firing),
               cudaMemcpyDeviceToHost));
       }
     }
@@ -291,7 +289,7 @@ void EventDrivenMap::SetPlottingWindow()
 
 void EventDrivenMap::PlotData()
 {
-  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mpGlobalZone, mpRefractTime, mNetworkSize);
+  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mpGlobalZone, mNetworkSize);
   char str[50];
   sprintf(str,"1D IF Network. Time = %f",mTime);
   mpWindow->setTitle(str);
@@ -299,13 +297,12 @@ void EventDrivenMap::PlotData()
   mpWindow->show();
 }
 
-__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int* pGlobalZone, const float* pRefractTime, const unsigned int networkSize)
+__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int* pGlobalZone, const unsigned int networkSize)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   if (index<networkSize)
   {
     pPlotVarY[index] = pGlobalState[index].x;
-    //pPlotVarY[index] = pRefractTime[index];
     //pPlotVarY[index] = (float) pGlobalZone[index];
   }
 }
@@ -379,7 +376,7 @@ __device__ float4 UpdateZone1( float eventTime,
     changeZoneFlag = 1;
     float dv = dfun1( crossTime, state.x, state.y, state.z, state.w, local_I);
     int iterate = 0;
-    while (fabs(v)>tol*(iterate/1000))
+    while (fabs(v)>tol)
     {
       crossTime -= 0.1f*v/dv;
       v  = fun1( crossTime, state.x, state.y, state.z, state.w, local_I, V_left);
@@ -457,7 +454,7 @@ __device__ float4 UpdateZone2( float eventTime,
     v -= V_right;
     float dv = dfun2( crossTime, state.x, state.y, state.z, state.w, local_I);
     int iterate = 0;
-    while (fabs(v)>tol*(iterate/1000))
+    while (fabs(v)>tol)
     {
       crossTime -= v/dv;
       v  = fun2( crossTime, state.x, state.y, state.z, state.w, local_I, V_right);
@@ -473,7 +470,7 @@ __device__ float4 UpdateZone2( float eventTime,
     v -= V_left;
     int iterate = 0;
     float dv = dfun2( crossTime, state.x, state.y, state.z, state.w, local_I);
-    while (fabs(v)>tol*(iterate/1000))
+    while (fabs(v)>tol)
     {
       crossTime -= v/dv;
       v  = fun2( crossTime, state.x, state.y, state.z, state.w, local_I, V_left);
@@ -549,9 +546,9 @@ __device__ float4 UpdateZone3( float eventTime,
     changeZoneFlag = -1;
     v  = fun3( crossTime, state.x, state.y, state.z, state.w, local_I, V_right);
     float dv = dfun3( crossTime, state.x, state.y, state.z, state.w, local_I);
-    int iterate = 0;
-    while (fabs(v)>tol*(iterate/1000))
+    while (fabs(v)>tol)
     {
+      int iterate = 0;
       crossTime -= v/dv;
       v  = fun3( crossTime, state.x, state.y, state.z, state.w, local_I, V_right);
       dv = dfun3( crossTime, state.x, state.y, state.z, state.w, local_I);
@@ -750,14 +747,11 @@ __device__ float FindSpikeTime( const float4 state, const float local_I)
   float f, df;
   f  = fun3( spikeTime, state.x, state.y, state.z, state.w, local_I, V_th);
   df = dfun3( spikeTime, state.x, state.y, state.z, state.w, local_I);
-  int iterate = 0;
 
-  while (fabs(f)>tol*(iterate/1000)) {
+  while (fabs(f)>tol) {
     spikeTime -= f/df;
     f  = fun3( spikeTime, state.x, state.y, state.z, state.w, local_I, V_th);
     df = dfun3( spikeTime, state.x, state.y, state.z, state.w, local_I);
-    printf("Iterate = %d,\t Index = %d,\t v = %f,\t zone = 3, \t time = %f\n",iterate,threadIdx.x,f,spikeTime);
-    iterate++;
   }
 
   return spikeTime;

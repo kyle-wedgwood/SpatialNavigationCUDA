@@ -28,13 +28,13 @@ int main( int argc, char* argv[])
   cout<< "Hyperpolarising some cells" << endl;
   p_event->SetAppliedCurrent( -30.0f);
 
-  pars.plotFreq = 10;
-  p_event->SetParameters( &pars);
   simulation_time += 250.0f;
   p_event->SimulateNetwork( simulation_time, extend_simulation);
 
   // Remove applied current
   cout<< "Removing hyperpolarising current" << endl;
+  pars.plotFreq = 10;
+  p_event->SetParameters( &pars);
   p_event->SetAppliedCurrent( 0.0f);
   simulation_time += 100000.f;
   p_event->SimulateNetwork( simulation_time, extend_simulation);

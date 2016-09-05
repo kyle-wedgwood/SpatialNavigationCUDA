@@ -55,31 +55,30 @@ if(NOT generated_file)
 endif()
 
 # Set these up as variables to make reading the generated file easier
-set(CMAKE_COMMAND "/Applications/CMake.app/Contents/bin/cmake") # path
-set(source_file "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/Driver.cu") # path
-set(NVCC_generated_dependency_file "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/Driver.dir//Driver_generated_Driver.cu.o.NVCC-depend") # path
-set(cmake_dependency_file "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/Driver.dir//Driver_generated_Driver.cu.o.depend") # path
-set(CUDA_make2cmake "/Applications/CMake.app/Contents/share/cmake-3.4/Modules/FindCUDA/make2cmake.cmake") # path
-set(CUDA_parse_cubin "/Applications/CMake.app/Contents/share/cmake-3.4/Modules/FindCUDA/parse_cubin.cmake") # path
+set(CMAKE_COMMAND "/usr/bin/cmake") # path
+set(source_file "/home/kyle/SpatialNagivationCUDA/Driver.cu") # path
+set(NVCC_generated_dependency_file "/home/kyle/SpatialNagivationCUDA/CMakeFiles/Driver.dir//Driver_generated_Driver.cu.o.NVCC-depend") # path
+set(cmake_dependency_file "/home/kyle/SpatialNagivationCUDA/CMakeFiles/Driver.dir//Driver_generated_Driver.cu.o.depend") # path
+set(CUDA_make2cmake "/usr/share/cmake-2.8/Modules/FindCUDA/make2cmake.cmake") # path
+set(CUDA_parse_cubin "/usr/share/cmake-2.8/Modules/FindCUDA/parse_cubin.cmake") # path
 set(build_cubin OFF) # bool
-set(CUDA_HOST_COMPILER "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang") # path
+set(CUDA_HOST_COMPILER "/usr/bin/cc") # bool
 # We won't actually use these variables for now, but we need to set this, in
 # order to force this file to be run again if it changes.
-set(generated_file_path "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/Driver.dir//.") # path
-set(generated_file_internal "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/Driver.dir//./Driver_generated_Driver.cu.o") # path
-set(generated_cubin_file_internal "/Users/kcaw201/Dropbox/Spatial Navigation CUDA/CMakeFiles/Driver.dir//./Driver_generated_Driver.cu.o.cubin.txt") # path
+set(generated_file_path "/home/kyle/SpatialNagivationCUDA/CMakeFiles/Driver.dir//.") # path
+set(generated_file_internal "/home/kyle/SpatialNagivationCUDA/CMakeFiles/Driver.dir//./Driver_generated_Driver.cu.o") # path
+set(generated_cubin_file_internal "/home/kyle/SpatialNagivationCUDA/CMakeFiles/Driver.dir//./Driver_generated_Driver.cu.o.cubin.txt") # path
 
-set(CUDA_NVCC_EXECUTABLE "/Developer/NVIDIA/CUDA-7.5/bin/nvcc") # path
-set(CUDA_NVCC_FLAGS -gencode;arch=compute_30,code=sm_30 ;; ) # list
+set(CUDA_NVCC_EXECUTABLE "/usr/local/cuda-7.5/bin/nvcc") # path
+set(CUDA_NVCC_FLAGS --std=c++11;-gencode;arch=compute_30,code=sm_30 ;; ) # list
 # Build specific configuration flags
 set(CUDA_NVCC_FLAGS_DEBUG  ; )
 set(CUDA_NVCC_FLAGS_MINSIZEREL  ; )
 set(CUDA_NVCC_FLAGS_RELEASE  ; )
 set(CUDA_NVCC_FLAGS_RELWITHDEBINFO  ; )
 set(nvcc_flags -m64) # list
-set(CUDA_NVCC_INCLUDE_ARGS "-I/Developer/NVIDIA/CUDA-7.5/include;-I/Developer/NVIDIA/CUDA-7.5/include") # list (needs to be in quotes to handle spaces properly).
+set(CUDA_NVCC_INCLUDE_ARGS "-I/usr/local/cuda-7.5/include;-I/usr/local/share/arrayfire-3/include;-I/usr/local/cuda-7.5/include") # list (needs to be in quotes to handle spaces properly).
 set(format_flag "-c") # string
-set(cuda_language_flag ) # list
 
 if(build_cubin AND NOT generated_cubin_file)
   message(FATAL_ERROR "You must specify generated_cubin_file on the command line")
@@ -115,7 +114,7 @@ list(APPEND CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS_${build_configuration}})
 # Any -ccbin existing in CUDA_NVCC_FLAGS gets highest priority
 list( FIND CUDA_NVCC_FLAGS "-ccbin" ccbin_found0 )
 list( FIND CUDA_NVCC_FLAGS "--compiler-bindir" ccbin_found1 )
-if( ccbin_found0 LESS 0 AND ccbin_found1 LESS 0 AND CUDA_HOST_COMPILER )
+if( ccbin_found0 LESS 0 AND ccbin_found1 LESS 0 )
   if (CUDA_HOST_COMPILER STREQUAL "$(VCInstallDir)bin" AND DEFINED CCBIN)
     set(CCBIN -ccbin "${CCBIN}")
   else()
@@ -135,7 +134,7 @@ endif()
 # and other return variables are present after executing the process.
 macro(cuda_execute_process status command)
   set(_command ${command})
-  if(NOT "x${_command}" STREQUAL "xCOMMAND")
+  if(NOT _command STREQUAL "COMMAND")
     message(FATAL_ERROR "Malformed call to cuda_execute_process.  Missing COMMAND as second argument. (command = ${command})")
   endif()
   if(verbose)
@@ -247,7 +246,6 @@ cuda_execute_process(
   "Generating ${generated_file}"
   COMMAND "${CUDA_NVCC_EXECUTABLE}"
   "${source_file}"
-  ${cuda_language_flag}
   ${format_flag} -o "${generated_file}"
   ${CCBIN}
   ${nvcc_flags}
