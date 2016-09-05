@@ -710,11 +710,10 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
                                   float dx,
                                   int spatialExtent)
 {
-  int local_index = threadIdx.x+blockDim.x*blockIdx.x+firingIndex-spatialExtent;
+  int local_index = threadIdx.x+blockDim.x*blockIdx.x-spatialExtent;
   if ((local_index>0) && (local_index<=2*spatialExtent))
   {
-    local_index -= spatialExtent;
-    pGlobalState[local_index].w += alpha*W(local_index*dx)*dx;
+    pGlobalState[local_index+firingIndex].w += alpha*W(local_index*dx)*dx;
   }
   if (threadIdx.x==0)
   {
