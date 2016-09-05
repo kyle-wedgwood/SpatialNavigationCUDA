@@ -2,3 +2,6 @@ dfun2.txt
 test*
 *.swp
 *.o
+.AppleDouble/
+CMakeCache.txt
+CMakeFiles/
