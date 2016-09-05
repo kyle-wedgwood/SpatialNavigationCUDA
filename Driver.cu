@@ -12,7 +12,7 @@ int main( int argc, char* argv[])
   pars.noThreads   = 1024;
   pars.domainSize  = 120.0;
   pars.timestep    = 0.1;
-  pars.plotFreq    = 10;
+  pars.plotFreq    = 100;
   pars.printOutput = 1;
 
   EventDrivenMap* p_event = new EventDrivenMap( &pars);
@@ -27,6 +27,9 @@ int main( int argc, char* argv[])
   // Now hyperpolarise subset of cells
   cout<< "Hyperpolarising some cells" << endl;
   p_event->SetAppliedCurrent( -30.0f);
+
+  pars.plotFreq = 10;
+  p_event->SetParameters( &pars);
   simulation_time += 250.0f;
   p_event->SimulateNetwork( simulation_time, extend_simulation);
 

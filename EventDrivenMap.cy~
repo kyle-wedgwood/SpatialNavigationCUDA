@@ -1,5 +1,5 @@
 /* Code to do one dimensional spiking model from Mayte's note */
-#include <iostream>
+#include <stdio.h>
 #include <cstdlib>
 #include <cmath>
 #include <curand.h>
@@ -114,18 +114,6 @@ void EventDrivenMap::SetAppliedCurrent( const float val)
   float temp_I = (-val/gl_steve);
   CUDA_CALL( cudaMemcpyToSymbol( I_app, &temp_I, sizeof(float)));
   printf("Applied current set to %f.\n",val);
-}
-
-void EventDrivenMap::SetParameters( const ParameterList* pParameterList)
-{
-  mNetworkSize = (*pParameterList).networkSize;
-  mNoThreads   = (*pParameterList).noThreads;
-  mNoBlocks    = (mNetworkSize+mNoThreads-1)/mNoThreads;
-  mDomainSize  = (*pParameterList).domainSize;
-  mDx          = 2.0f*mDomainSize/(mNetworkSize);
-  mDt          = (*pParameterList).timestep;
-  mPlotFreq    = (*pParameterList).plotFreq;
-  mPrintOutput = (*pParameterList).printOutput;
 }
 
 void EventDrivenMap::SimulateNetwork( const float finalTime, bool extend)
@@ -289,7 +277,7 @@ void EventDrivenMap::SetPlottingWindow()
 
 void EventDrivenMap::PlotData()
 {
-  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mpGlobalZone, mNetworkSize);
+  CopyDataToPlotBufferKernel<<<mNoBlocks,mNoThreads>>>( mpPlotVarYHelper, mpGlobalState, mNetworkSize);
   char str[50];
   sprintf(str,"1D IF Network. Time = %f",mTime);
   mpWindow->setTitle(str);
@@ -297,13 +285,12 @@ void EventDrivenMap::PlotData()
   mpWindow->show();
 }
 
-__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int* pGlobalZone, const unsigned int networkSize)
+__global__ void CopyDataToPlotBufferKernel( float* pPlotVarY, const float4* pGlobalState, const unsigned int networkSize)
 {
   unsigned int index = threadIdx.x+blockDim.x*blockIdx.x;
   if (index<networkSize)
   {
     pPlotVarY[index] = pGlobalState[index].x;
-    //pPlotVarY[index] = (float) pGlobalZone[index];
   }
 }
 
@@ -723,15 +710,16 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
                                   float dx,
                                   int spatialExtent)
 {
-  int local_index = threadIdx.x+blockDim.x*blockIdx.x-spatialExtent;
+  int local_index = threadIdx.x+blockDim.x*blockIdx.x+firingIndex-spatialExtent;
   if ((local_index>0) && (local_index<=2*spatialExtent))
   {
-    pGlobalState[local_index+firingIndex].w += alpha*W(local_index*dx)*dx;
+    local_index -= spatialExtent;
+    pGlobalState[local_index].w += alpha*W(local_index*dx)*dx;
   }
   if (threadIdx.x==0)
   {
     pGlobalState[firingIndex].x = V_r;
-    pGlobalZone [firingIndex] = 4;
+    pGlobalZone [firingIndex] = 2;
     pRefractTime[firingIndex] = tau_r;
   }
 }
