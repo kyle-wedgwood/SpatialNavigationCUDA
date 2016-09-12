@@ -67,6 +67,7 @@ endTime = currentTime+250.0;
 [t,y] = ode45( @IFfunSteve, [currentTime, endTime], currentState, options, p);
 tt = [tt;t];
 yy = [yy;y];
+plot(t,y(:,1));
 
 currentState = yy(end,:)';
 currentTime = endTime;

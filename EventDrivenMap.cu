@@ -59,7 +59,7 @@ EventDrivenMap::EventDrivenMap( const ParameterList* pParameterList)
   mNoThreads   = (*pParameterList).noThreads;
   mNoBlocks    = (mNetworkSize+mNoThreads-1)/mNoThreads;
   mDomainSize  = (*pParameterList).domainSize;
-  mDx          = 2.0f*mDomainSize/(mNetworkSize);
+  mDx          = 2.0f*mDomainSize/(mNetworkSize-1);
   mDt          = (*pParameterList).timestep;
   mPlotFreq    = (*pParameterList).plotFreq;
   mPrintOutput = (*pParameterList).printOutput;
@@ -154,6 +154,7 @@ void EventDrivenMap::SimulateNetwork( const float finalTime, bool extend)
   } while ((mTime<finalTime) & (!(*mpWindow).close()));
 
   printf("Simulation finished successfully.\n");
+  getchar();
 }
 
 void EventDrivenMap::InitialiseNetwork()
@@ -205,7 +206,7 @@ void EventDrivenMap::CalculateSpatialExtent()
 void EventDrivenMap::SimulateStep()
 {
   float local_time = 0.0f;
-  while (local_time<mDt)
+  while (mDt-local_time>tol)
   {
     // First, find spiking cell
     CUDA_CALL( cudaMemset( mpEventNo, 0, sizeof(int)));
@@ -228,6 +229,10 @@ void EventDrivenMap::SimulateStep()
     // Update time
     local_time += (*mpHost_firingVal).time;
 
+    // For debugging
+    //if (mTime>1250.0f)
+    //  getchar();
+
     // Reset neuron that fired
     //if (*mpHost_eventNo>0)
     //{
@@ -242,8 +247,9 @@ void EventDrivenMap::SimulateStep()
     {
       if (fabs((*mpHost_firingVal).time-spike_time)<tol)
       {
-        ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( mpGlobalState,
-            mpGlobalZone, (*mpHost_firingVal).index, mpRefractTime, mDx, mSpatialExtent);
+        ApplyResetKernel<<<(2*mSpatialExtent+mNoThreads-1)/mNoThreads,mNoThreads>>>( 
+		mpGlobalState, mpGlobalZone, (*mpHost_firingVal).index, 
+		mpRefractTime, mDx, mSpatialExtent, mNetworkSize);
         CUDA_CHECK_ERROR();
         CUDA_CALL( cudaMemcpy( mpHost_firingVal, mpFiringVal+i+1, sizeof(firing),
               cudaMemcpyDeviceToHost));
@@ -251,7 +257,7 @@ void EventDrivenMap::SimulateStep()
     }
 
     // Reset memory
-    if ((*mpHost_firingVal).time<mDt)
+    if (spike_time<mDt)
     {
       if (*mpHost_eventNo==0)
       {
@@ -265,11 +271,10 @@ void EventDrivenMap::SimulateStep()
       }
     }
     if (mPrintOutput)
-    {
       printf("Memory reset.\n");
-      printf("Step finished.\n");
-    }
   }
+  if (mPrintOutput)
+    printf("Step finished.\n");
 }
 
 void EventDrivenMap::SetXAxis( af::array* mpPlotVarX)
@@ -377,6 +382,7 @@ __device__ float4 UpdateZone1( float eventTime,
   if (v > V_left)
   {
     changeZoneFlag = 1;
+    v -= V_left;
     float dv = dfun1( crossTime, state.x, state.y, state.z, state.w, local_I);
     int iterate = 0;
     while (fabs(v)>tol*(iterate/1000))
@@ -544,6 +550,8 @@ __device__ float4 UpdateZone3( float eventTime,
   float local_I =
     (-I_steve/gl_steve)+I_app*(index>=I_app_first)*(index<I_app_last);
   float v = fun3( crossTime, state.x, state.y, state.z, state.w, local_I, 0.0f);
+  if (threadIdx.x==0)
+    printf("Voltage = %f\n",v);
   if (v < V_right)
   {
     changeZoneFlag = -1;
@@ -556,7 +564,7 @@ __device__ float4 UpdateZone3( float eventTime,
       v  = fun3( crossTime, state.x, state.y, state.z, state.w, local_I, V_right);
       dv = dfun3( crossTime, state.x, state.y, state.z, state.w, local_I);
       if (threadIdx.x==0)
-        printf("Iterate = %d,\t v = %f,\t zone = 3, \t time = %f\n",iterate,v,crossTime);
+        printf("Iterate = %d,\t v = %f,\t zone = 3, \t time = %f\n",iterate,v+V_right,crossTime);
       iterate++;
     }
   }
@@ -724,12 +732,17 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
                                   unsigned int firingIndex,
                                   float* pRefractTime,
                                   float dx,
-                                  int spatialExtent)
+                                  int spatialExtent,
+				  unsigned int networkSize)
 {
   int local_index = threadIdx.x+blockDim.x*blockIdx.x-spatialExtent;
-  if ((local_index>0) && (local_index<=2*spatialExtent))
+  if ((local_index>=-spatialExtent) && (local_index<=spatialExtent))
   {
-    pGlobalState[local_index+firingIndex].w += alpha*W(local_index*dx)*dx;
+    local_index += firingIndex;
+    if ((local_index>=0) && (local_index<=networkSize))
+    {
+      pGlobalState[local_index].w += alpha*W((local_index-(int)firingIndex)*dx)*dx;
+    }
   }
   if (threadIdx.x==0)
   {
@@ -741,7 +754,7 @@ __global__ void ApplyResetKernel( float4* pGlobalState,
 
 __host__ __device__ float W( const float x)
 {
-  return w0/2*(tanh(beta*(sigma-x))+tanh(beta*(sigma+x)));
+  return (w0/2)*(tanh(beta*(sigma-x))+tanh(beta*(sigma+x)));
 }
 
 __device__ float FindSpikeTime( const float4 state, const float local_I)
@@ -797,7 +810,6 @@ void EventDrivenMap::FindMinimumSpikeTime( float timestep)
   FindSpikeTimeKernel<<<mNoBlocks,mNoThreads>>>( mpGlobalState, mpGlobalZone,
                        timestep, mpFiringVal, mpEventNo);
   CUDA_CHECK_ERROR();
-  CUDA_CALL( cudaDeviceSynchronize());
   if (mPrintOutput)
     printf("Spike times found.\n");
 

@@ -144,7 +144,7 @@ __device__ float4 UpdateStateZone4( float t, float4 state);
 
 // Update synaptic input to cells
 __host__ __device__ float W( const float x);
-__global__ void ApplyResetKernel( float4* pGlobalState, unsigned int* pGlobalZone, unsigned int index, float* pRefractTime, float dx, int spatial_extent);
+__global__ void ApplyResetKernel( float4* pGlobalState, unsigned int* pGlobalZone, unsigned int index, float* pRefractTime, float dx, int spatial_extent, unsigned int networkSize);
 
 // Clear memory
 __global__ void ResetMemoryKernel( EventDrivenMap::firing* pFiringVal, const unsigned int resetSize, const float stepSize);

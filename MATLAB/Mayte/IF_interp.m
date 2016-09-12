@@ -5,7 +5,7 @@ clear all;
 P.C =1; %time constant
 P.g_l = 0.25;%0.15;%0.3;
 P.alpha =P.g_l/(P.C*5);%0.5;
-P.tau_h =800;
+P.tau_h =400;
 P.tau_reset =200;%15;%5;%refractoriness constant
 P.V_th =14; %4.5;%11;%threshold
 P.V_reset = 0; %reset
@@ -38,7 +38,7 @@ P.W = P.w0*(tanh(P.beta*(P.sigma+dif))+tanh(P.beta*(P.sigma-dif)))/2;
 
 %time 
 P.dt = 0.01;%0.005;
-t_max =20000;
+t_max = 20000;
 t_aux = 10000;%length(0:0.0045:t_max);%100000;%
 t =zeros(length(0:0.0049:t_max),1);
 t(1) = 0;
@@ -75,6 +75,7 @@ save new4.mat VV nn tt3 x spikes2 -v7.3
 while t(index+index2) <= t_max
 %     initial hyperpolarisation
     if t(index+index2) >= 1000 && t(index+index2)<P.t_V_ini
+%         plot(V_new);drawnow;
       I_ini(aux_V) = P.V_ini;
     end
      if t(index+index2) >= P.t_V_ini
